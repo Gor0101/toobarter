@@ -1,0 +1,26 @@
+{
+  "name": "toobarter",
+  "version": "1.0.0",
+  "description": "Площадка обмена автомобилей и недвижимости (hy / ru / en)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js",
+    "reset": "node -e \"require('fs').rmSync('data',{recursive:true,force:true});require('fs').rmSync('uploads',{recursive:true,force:true});console.log('База и фото очищены')\"",
+    "test": "node tools/fronttest.js",
+    "icons": "node tools/icons.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.4.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0"
+  },
+  "license": "MIT",
+  "private": true
+}
