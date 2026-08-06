@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Площадка обмена автомобилей и недвижимости (hy / ru / en)",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "seed": "node seed.js",

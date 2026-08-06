@@ -14,7 +14,17 @@ const dom = new JSDOM(fs.readFileSync(path.join(pub, 'index.html'), 'utf8'), {
 });
 const w = dom.window;
 
-w.fetch = (url, opts) => fetch(url.startsWith('http') ? url : BASE + url, opts);
+// jsdom's FormData не распознаётся встроенным fetch (undici) как multipart —
+// на границе fetch пересобираем тело в нативный класс, иначе запросы
+// с файлами уходят с пустым телом и сервер получает req.body === undefined.
+w.fetch = (url, opts) => {
+  if (opts && opts.body && typeof opts.body.entries === 'function' && !(opts.body instanceof FormData)) {
+    const native = new FormData();
+    for (const [k, v] of opts.body.entries()) native.append(k, v);
+    opts = { ...opts, body: native };
+  }
+  return fetch(url.startsWith('http') ? url : BASE + url, opts);
+};
 w.localStorage.setItem('lang', 'ru');
 w.URL.createObjectURL = () => 'blob:x';
 w.confirm = () => true;
@@ -258,7 +268,7 @@ async function visit(hash, label, mustContain) {
   // другой пользователь публикует подходящее объявление
   const lil = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: 'lilit@demo.am', password: 'demo1234' }) }).then((x) => x.json());
-  const fd = new w.FormData();
+  const fd = new FormData();
   [['kind', 'car'], ['make', 'Toyota'], ['model', 'Corolla'], ['year', '2021'], ['mileage', '30000'],
    ['city', 'yerevan'], ['price', '19000']].forEach(([k, v]) => fd.set(k, v));
   const posted = await fetch(BASE + '/api/listings', { method: 'POST', headers: { Authorization: 'Bearer ' + lil.token }, body: fd })
@@ -266,16 +276,16 @@ async function visit(hash, label, mustContain) {
   console.log((posted.notified >= 1 ? 'OK  ' : 'FAIL') + '  оповещено получателей     ' + posted.notified);
   if (!posted.notified) errors.push('оповещение по поиску не сработало');
 
-  await visit('#/alerts', 'совпадение в списке', 'Corolla');
+  // счётчик растёт до захода на вкладку «Поиски» — сам заход отмечает всё прочитанным
   const sum = await fetch(BASE + '/api/summary', { headers: { Authorization: 'Bearer ' + mher.token } }).then((x) => x.json());
   console.log((sum.newMatches >= 1 ? 'OK  ' : 'FAIL') + '  счётчик новых совпадений  ' + sum.newMatches);
   if (!sum.newMatches) errors.push('счётчик совпадений не вырос');
 
-  w.document.getElementById('mark-read').click();
-  await sleep(800);
+  await visit('#/alerts', 'совпадение в списке', 'Corolla');
+  await sleep(500);
   const sum2 = await fetch(BASE + '/api/summary', { headers: { Authorization: 'Bearer ' + mher.token } }).then((x) => x.json());
-  console.log((sum2.newMatches === 0 ? 'OK  ' : 'FAIL') + '  отметка «прочитано»       ' + sum2.newMatches);
-  if (sum2.newMatches !== 0) errors.push('пометка прочитанным не сработала');
+  console.log((sum2.newMatches === 0 ? 'OK  ' : 'FAIL') + '  отметка «прочитано» при заходе  ' + sum2.newMatches);
+  if (sum2.newMatches !== 0) errors.push('заход на «Поиски» не отметил совпадения прочитанными');
 
   // ---- нижнее меню ----
   const tabs = [...w.document.querySelectorAll('#tabbar a')];

@@ -60,7 +60,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: 4px;
 }
 
-h1, h2, h3 { font-family: var(--font-display); font-weight: 800; letter-spacing: -.02em; margin: 0; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 800; letter-spacing: -.02em; margin: 0; min-width: 0; }
 h1 { font-size: 30px; line-height: 1.15; }
 h2 { font-size: 21px; }
 h3 { font-size: 17px; }
@@ -269,7 +269,7 @@ h3 { font-size: 17px; }
 
 .searchbar { display: flex; gap: 8px; margin-bottom: 14px; }
 .searchbar input {
-  flex: 1; padding: 12px 14px; border-radius: 12px;
+  flex: 1; min-width: 0; padding: 12px 14px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--surface);
 }
 .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
@@ -478,6 +478,9 @@ h3 { font-size: 17px; }
   .listing { grid-template-columns: 1fr; }
   .chat-wrap { grid-template-columns: 1fr; }
   .sticky { position: static; }
+  /* у голого 1fr есть неявный minmax(auto, 1fr) — длинное непереносимое
+     содержимое (ник, слово на hy) раздвигает трек шире контейнера */
+  .listing > *, .chat-wrap > * { min-width: 0; }
 }
 
 @media (max-width: 720px) {

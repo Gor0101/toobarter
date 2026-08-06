@@ -1556,7 +1556,7 @@ async function pageAlerts(alertId) {
         ${unseen ? `<button class="btn btn-ghost btn-sm" id="mark-read">${esc(t('markRead'))}</button>` : ''}
       </div>
       ${notif.items.length ? `<div class="notif-list">${notif.items.map((n) => `
-        <a class="notif${n.seen ? '' : ' new'}" href="#/l/${n.listing_id}">
+        <a class="notif${n.seen ? '' : ' new'}" href="#/l/${n.listing_id}" data-notif-id="${n.id}">
           ${n.photo ? `<img src="${esc(n.photo)}" alt="">` : `<div class="ph">${n.kind === 'car' ? '🚗' : '🏠'}</div>`}
           <div class="txt">
             <b>${esc(n.title)}</b>
@@ -1599,6 +1599,19 @@ async function pageAlerts(alertId) {
     await refreshSummary();
     render();
   });
+
+  // заход на вкладку «Поиски» сам по себе считается просмотром уведомлений —
+  // значок на вкладке гаснет так же, как на «Офферах», не дожидаясь клика
+  if (unseen) API.post('/notifications/read').then(refreshSummary).catch(() => {});
+
+  // при переходе на объявление отмечаем именно это уведомление прочитанным —
+  // "+1" в шапке и на карточке поиска пропадает, не дожидаясь общей кнопки
+  view().querySelectorAll('.notif[data-notif-id]').forEach((a) => a.addEventListener('click', () => {
+    if (a.classList.contains('new')) {
+      a.classList.remove('new');
+      API.post(`/notifications/${a.dataset.notifId}/read`).then(refreshSummary).catch(() => {});
+    }
+  }));
 
   view().querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
     await API.patch('/alerts/' + b.dataset.toggle, { active: Number(b.dataset.active) });

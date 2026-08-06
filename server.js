@@ -72,7 +72,7 @@ function auth(req, res, next) {
 
 app.use(softAuth);
 
-const num = (v) => (v === '' || v === null || v === undefined || isNaN(Number(v)) ? null : Number(v));
+const num = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
 const int = (v) => {
   const n = num(v);
   return n === null ? null : Math.round(n);
@@ -95,17 +95,21 @@ function wrap(fn) {
 /* загрузка фотографий                                                 */
 /* ------------------------------------------------------------------ */
 
+// расширение на диске берём из провалидированного mimetype, а не из
+// originalname — иначе можно прислать mimetype: image/jpeg с filename: x.svg
+// и получить исполняемый SVG, отданный /uploads как image/svg+xml
+const MIME_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'image/avif': '.avif' };
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
   filename: (_req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase().slice(0, 6);
+    const ext = MIME_EXT[file.mimetype] || '.jpg';
     cb(null, Date.now() + '-' + crypto.randomBytes(6).toString('hex') + ext);
   },
 });
 const upload = multer({
   storage,
   limits: { fileSize: 8 * 1024 * 1024, files: 12 },
-  fileFilter: (_req, file, cb) => cb(null, /^image\/(jpe?g|png|webp|gif|avif)$/.test(file.mimetype)),
+  fileFilter: (_req, file, cb) => cb(null, Object.prototype.hasOwnProperty.call(MIME_EXT, file.mimetype)),
 });
 
 /* ------------------------------------------------------------------ */
@@ -315,13 +319,18 @@ app.get('/api/listings', wrap((req, res) => {
 
 app.get('/api/listings/:id', wrap((req, res) => {
   const row = db
-    .prepare(`SELECT l.*, u.name owner_name, u.phone owner_phone, u.city owner_city, u.created_at owner_since
+    .prepare(`SELECT l.*, u.name owner_name, u.city owner_city, u.created_at owner_since
               FROM listings l JOIN users u ON u.id = l.user_id WHERE l.id = ?`)
     .get(int(req.params.id));
   if (!row) return res.status(404).json({ error: 'not_found' });
   if (row.status !== 'active' && (!req.user || req.user.id !== row.user_id)) return res.status(404).json({ error: 'not_found' });
 
-  db.prepare('UPDATE listings SET views = views + 1 WHERE id = ?').run(row.id);
+  // телефон владельца — только ему самому; остальным он не отдаётся API вовсе
+  if (req.user && req.user.id === row.user_id) {
+    row.owner_phone = db.prepare('SELECT phone FROM users WHERE id = ?').get(row.user_id).phone;
+  }
+
+  if (!req.user || req.user.id !== row.user_id) db.prepare('UPDATE listings SET views = views + 1 WHERE id = ?').run(row.id);
   attachPhotos([row]);
 
   let myOffer = null;
@@ -346,7 +355,7 @@ function listingFields(body) {
     title: str(body.title, 120),
     description: str(body.description, 4000),
     city: str(body.city, 60),
-    price: int(body.price),
+    price: body.price !== undefined && body.price !== '' ? Math.max(0, int(body.price) || 0) : null,
     currency: oneOf(body.currency, CURRENCIES, 'USD'),
     pay_direction: oneOf(body.pay_direction, DIRECTIONS, 'none'),
     pay_amount: Math.max(0, int(body.pay_amount) || 0),
@@ -467,8 +476,12 @@ app.patch('/api/listings/:id', auth, upload.array('photos', 12), wrap((req, res)
     }
   }
   const maxSort = db.prepare('SELECT COALESCE(MAX(sort), -1) m FROM photos WHERE listing_id = ?').get(id).m;
+  const kept = db.prepare('SELECT COUNT(*) c FROM photos WHERE listing_id = ?').get(id).c;
+  const room = Math.max(0, 12 - kept);
+  const files = (req.files || []).slice(0, room);
+  (req.files || []).slice(room).forEach((file) => fs.promises.unlink(path.join(UPLOAD_DIR, file.filename)).catch(() => {}));
   const ins = db.prepare('INSERT INTO photos (listing_id, file, sort) VALUES (?,?,?)');
-  (req.files || []).forEach((file, i) => ins.run(id, file.filename, maxSort + 1 + i));
+  files.forEach((file, i) => ins.run(id, file.filename, maxSort + 1 + i));
 
   res.json({ ok: true, id });
 }));
@@ -611,10 +624,24 @@ app.post('/api/offers/:id/:action', auth, wrap((req, res) => {
     return res.json({ ok: true });
   }
   if (action === 'accept') {
-    db.prepare("UPDATE offers SET status='accepted' WHERE id=?").run(id);
-    const info = db
-      .prepare('INSERT INTO conversations (offer_id, user_a, user_b) VALUES (?,?,?)')
-      .run(id, offer.to_user_id, offer.from_user_id);
+    const busy = db.prepare("SELECT 1 FROM listings WHERE id IN (?,?) AND status <> 'active'")
+      .get(offer.listing_id, offer.offered_listing_id);
+    if (busy) return res.status(409).json({ error: 'listing_no_longer_available' });
+    // приняли одно предложение — оба объекта сделки выбывают из оборота:
+    // помечаем их «в сделке» и отклоняем остальные предложения по ним,
+    // иначе один и тот же автомобиль можно было отдать нескольким людям сразу
+    const acceptTx = db.transaction(() => {
+      db.prepare("UPDATE offers SET status='accepted' WHERE id=?").run(id);
+      db.prepare("UPDATE listings SET status='done' WHERE id IN (?,?) AND status='active'")
+        .run(offer.listing_id, offer.offered_listing_id);
+      db.prepare(`UPDATE offers SET status='rejected'
+                  WHERE id <> ? AND status='pending'
+                    AND (listing_id IN (?,?) OR offered_listing_id IN (?,?))`)
+        .run(id, offer.listing_id, offer.offered_listing_id, offer.listing_id, offer.offered_listing_id);
+      return db.prepare('INSERT INTO conversations (offer_id, user_a, user_b) VALUES (?,?,?)')
+        .run(id, offer.to_user_id, offer.from_user_id);
+    });
+    const info = acceptTx();
     return res.json({ ok: true, conversation_id: info.lastInsertRowid });
   }
   res.status(400).json({ error: 'bad_action' });
@@ -818,7 +845,7 @@ app.delete('/api/alerts/:id', auth, wrap((req, res) => {
 app.get('/api/alerts/:id/matches', auth, wrap((req, res) => {
   const row = db.prepare('SELECT * FROM alerts WHERE id = ?').get(int(req.params.id));
   if (!row || row.user_id !== req.user.id) return res.status(404).json({ error: 'not_found' });
-  res.json({ items: attachWishes(alertMatches(row, req.user.id, 24)) });
+  res.json({ items: alertMatches(row, req.user.id, 24) });
 }));
 
 app.get('/api/notifications', auth, wrap((req, res) => {
@@ -834,6 +861,13 @@ app.get('/api/notifications', auth, wrap((req, res) => {
 
 app.post('/api/notifications/read', auth, wrap((req, res) => {
   db.prepare('UPDATE notifications SET seen = 1 WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true });
+}));
+
+app.post('/api/notifications/:id/read', auth, wrap((req, res) => {
+  const row = db.prepare('SELECT * FROM notifications WHERE id = ?').get(int(req.params.id));
+  if (!row || row.user_id !== req.user.id) return res.status(404).json({ error: 'not_found' });
+  db.prepare('UPDATE notifications SET seen = 1 WHERE id = ?').run(row.id);
   res.json({ ok: true });
 }));
 
