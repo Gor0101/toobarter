@@ -19,11 +19,12 @@
   }
 
   /* Проверка одного пожелания.
-     w     — пожелание владельца
-     c     — предложенный объект (объявление того, кто предлагает)
-     offer — { pay_direction, pay_amount, pay_currency } со стороны предлагающего
+     w        — пожелание владельца
+     c        — предложенный объект (объявление того, кто предлагает)
+     offer    — { pay_direction, pay_amount, pay_currency } со стороны предлагающего
+     listing  — само объявление владельца (для условия по доплате, см. ниже)
      Возвращает { ok, checks: [{ field, ok, need, got }] } */
-  function checkWish(w, c, offer) {
+  function checkWish(w, c, offer, listing) {
     const checks = [];
     const add = (field, ok, need, got) => checks.push({ field, ok: !!ok, need, got });
 
@@ -58,17 +59,24 @@
 
     /* Доплата. Пожелание записано со стороны владельца:
        in  — «мне доплачивают минимум N» → предлагающий должен платить (out) не меньше N
-       out — «я готов доплатить максимум N» → предлагающий получает (in) не больше N */
-    const dir = w.pay_direction;
-    if ((dir === 'in' || dir === 'out') && !(offer && offer.ignorePay)) {
+       out — «я готов доплатить максимум N» → предлагающий получает (in) не больше N
+       Если конкретное пожелание своё условие по доплате не задало (none),
+       в силе остаётся общее условие, указанное владельцем в самом объявлении —
+       иначе его легко обойти, просто не заполнив доплату в пожелании. */
+    const pay = (w.pay_direction === 'in' || w.pay_direction === 'out')
+      ? { direction: w.pay_direction, min: w.pay_min, currency: w.pay_currency }
+      : (listing && (listing.pay_direction === 'in' || listing.pay_direction === 'out')
+          ? { direction: listing.pay_direction, min: listing.pay_amount, currency: listing.pay_currency }
+          : null);
+    if (pay && !(offer && offer.ignorePay)) {
       const o = offer || {};
       const amount = n(o.pay_amount) || 0;
-      const min = n(w.pay_min) || 0;
+      const min = n(pay.min) || 0;
       let ok;
-      if (dir === 'in') ok = o.pay_direction === 'out' && amount >= min;
+      if (pay.direction === 'in') ok = o.pay_direction === 'out' && amount >= min;
       else ok = (o.pay_direction === 'none' && min >= 0) || (o.pay_direction === 'in' && amount <= min);
-      if (ok && o.pay_direction !== 'none' && w.pay_currency && o.pay_currency && w.pay_currency !== o.pay_currency) ok = false;
-      add('pay', ok, { direction: dir, amount: min, currency: w.pay_currency || 'USD' },
+      if (ok && o.pay_direction !== 'none' && pay.currency && o.pay_currency && pay.currency !== o.pay_currency) ok = false;
+      add('pay', ok, { direction: pay.direction, amount: min, currency: pay.currency || 'USD' },
         { direction: o.pay_direction || 'none', amount, currency: o.pay_currency || 'USD' });
     }
 
@@ -76,28 +84,39 @@
   }
 
   /* Проверка объекта по всем пожеланиям: достаточно совпасть с одним вариантом.
-     Возвращает { ok, index, result, results } — index указывает на лучший вариант. */
-  function matchListing(wishes, c, offer) {
+     listing — само объявление владельца; если пожеланий нет вообще, но в
+     объявлении задана общая доплата, она сама становится условием, а не
+     игнорируется как при полностью свободном обмене.
+     Возвращает { ok, index, result, results, effectiveWishes } — index
+     указывает на лучший вариант внутри effectiveWishes. */
+  function matchListing(wishes, c, offer, listing) {
     const list = Array.isArray(wishes) ? wishes : [];
-    if (!list.length) return { ok: true, free: true, index: -1, result: null, results: [] };
+    const hasOwnPay = listing && (listing.pay_direction === 'in' || listing.pay_direction === 'out');
+    if (!list.length && !hasOwnPay) return { ok: true, free: true, index: -1, result: null, results: [], effectiveWishes: [] };
 
-    const results = list.map((w) => checkWish(w, c, offer));
+    const effectiveWishes = list.length ? list : [{ kind: 'any', pay_direction: 'none' }];
+    const results = effectiveWishes.map((w) => checkWish(w, c, offer, listing));
     let best = 0;
     for (let i = 0; i < results.length; i++) {
       if (results[i].ok) { best = i; break; }
       const score = (r) => r.checks.filter((x) => x.ok).length - r.checks.filter((x) => !x.ok).length;
       if (score(results[i]) > score(results[best])) best = i;
     }
-    return { ok: results.some((r) => r.ok), free: false, index: best, result: results[best], results };
+    return { ok: results.some((r) => r.ok), free: false, index: best, result: results[best], results, effectiveWishes };
   }
 
-  /* Минимальная доплата, которую ждёт владелец по конкретному пожеланию */
-  function suggestedPay(w) {
-    if (!w || (w.pay_direction !== 'in' && w.pay_direction !== 'out')) return null;
+  /* Минимальная доплата, которую ждёт владелец: своя у пожелания,
+     а если её нет — общая, указанная в самом объявлении */
+  function suggestedPay(w, listing) {
+    const own = w && (w.pay_direction === 'in' || w.pay_direction === 'out');
+    const src = own ? w : (listing && (listing.pay_direction === 'in' || listing.pay_direction === 'out') ? listing : null);
+    if (!src) return null;
+    const min = own ? w.pay_min : listing.pay_amount;
+    const currency = own ? w.pay_currency : listing.pay_currency;
     return {
-      direction: w.pay_direction === 'in' ? 'out' : 'in',
-      amount: Number(w.pay_min) || 0,
-      currency: w.pay_currency || 'USD',
+      direction: src.pay_direction === 'in' ? 'out' : 'in',
+      amount: Number(min) || 0,
+      currency: currency || 'USD',
     };
   }
 

@@ -546,13 +546,14 @@ async function openOfferModal(target) {
     return;
   }
 
-  const fitOf = (item, deal) => MATCH.matchListing(wishes, item, deal || { ignorePay: true });
+  const fitOf = (item, deal) => MATCH.matchListing(wishes, item, deal || { ignorePay: true }, target);
   const preferred = active.find((i) => fitOf(i).ok) || active[0];
   const state = { id: preferred.id, dir: 'none', amount: 0, cur: 'USD' };
 
-  /* Если владелец назвал условие по доплате — подставляем его сразу */
+  /* Если владелец назвал условие по доплате — подставляем его сразу
+     (у конкретного пожелания или, если оно его не задало, из самого объявления) */
   const pre = fitOf(preferred);
-  const sug = !pre.free && pre.index >= 0 ? MATCH.suggestedPay(wishes[pre.index]) : null;
+  const sug = !pre.free && pre.index >= 0 ? MATCH.suggestedPay(pre.effectiveWishes[pre.index], target) : null;
   if (sug) { state.dir = sug.direction; state.amount = sug.amount; state.cur = sug.currency; }
 
   const optionLabel = (i) => `${fitOf(i).ok ? '✓ ' : ''}${i.title} — ${money(i.price, i.currency)}`;
@@ -609,20 +610,25 @@ async function openOfferModal(target) {
 
   /* Живая проверка: пересчитывается на каждое изменение */
   function drawMatch() {
-    const m = MATCH.matchListing(wishes, currentItem(), deal());
+    const m = MATCH.matchListing(wishes, currentItem(), deal(), target);
     if (m.free) {
       matchBox.innerHTML = `<div class="match free">${esc(t('matchFree'))}</div>`;
       sendBtn.textContent = t('offerSend');
       return;
     }
-    const w = wishes[m.index];
+    const w = m.effectiveWishes[m.index];
     const payCheck = m.result.checks.find((c) => c.field === 'pay');
-    const canFix = payCheck && !payCheck.ok && MATCH.suggestedPay(w);
+    const canFix = payCheck && !payCheck.ok && MATCH.suggestedPay(w, target);
+    /* если своих пожеланий нет — это общее условие доплаты из объявления,
+       а не пронумерованный вариант, поэтому шапку с «Пожелание 01» не показываем */
+    const headLabel = wishes.length
+      ? `${esc(t('wishN'))} ${String(m.index + 1).padStart(2, '0')} · ${esc(wishKindLabel(w))}`
+      : esc(t('payDirection'));
     matchBox.innerHTML = `
       <div class="match ${m.ok ? 'ok' : 'no'}">
         <div class="match-head">
           <b>${m.ok ? '✓ ' + esc(t('matchOk')) : '✕ ' + esc(t('matchNo'))}</b>
-          <span class="small muted">${esc(t('wishN'))} ${String(m.index + 1).padStart(2, '0')} · ${esc(wishKindLabel(w))}</span>
+          <span class="small muted">${headLabel}</span>
         </div>
         <div class="checks">${m.result.checks.map(checkRow).join('')}</div>
         ${canFix ? `<button type="button" class="btn btn-sm" id="fix-pay">${esc(t('fillMinPay'))}</button>` : ''}
@@ -630,7 +636,7 @@ async function openOfferModal(target) {
       </div>`;
     const fix = matchBox.querySelector('#fix-pay');
     if (fix) fix.addEventListener('click', () => {
-      const p = MATCH.suggestedPay(w);
+      const p = MATCH.suggestedPay(w, target);
       state.dir = p.direction; state.amount = p.amount; state.cur = p.currency;
       syncPayInputs(); drawMatch();
     });

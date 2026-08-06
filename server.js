@@ -565,7 +565,7 @@ app.post('/api/offers', auth, wrap((req, res) => {
     pay_amount: Math.max(0, int(req.body.pay_amount) || 0),
     pay_currency: oneOf(req.body.pay_currency, CURRENCIES, 'USD'),
   };
-  const m = MATCH.matchListing(getWishes(target.id), offered, deal);
+  const m = MATCH.matchListing(getWishes(target.id), offered, deal, target);
 
   const info = db
     .prepare(`INSERT INTO offers (listing_id, offered_listing_id, from_user_id, to_user_id, message,
