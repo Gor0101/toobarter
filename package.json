@@ -4,10 +4,10 @@
   "description": "Площадка обмена автомобилей и недвижимости (hy / ru / en)",
   "main": "server.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.12"
   },
   "scripts": {
-    "start": "node server.js",
+    "start": "node --env-file-if-exists=.env server.js",
     "seed": "node seed.js",
     "reset": "node -e \"require('fs').rmSync('data',{recursive:true,force:true});require('fs').rmSync('uploads',{recursive:true,force:true});console.log('База и фото очищены')\"",
     "test": "node tools/fronttest.js",

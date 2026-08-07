@@ -12,3 +12,7 @@ services:
         value: 22.11.0
       - key: JWT_SECRET
         generateValue: true
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: PAYMENT_INSTRUCTIONS
+        sync: false

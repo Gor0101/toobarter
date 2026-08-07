@@ -39,13 +39,33 @@ const KINDS = ['car', 'realty'];
 const REALTY_TYPES = ['land', 'house', 'apartment', 'commercial'];
 const DIRECTIONS = ['none', 'in', 'out'];
 
+// монетизация: платное поднятие объявления в топ на N дней.
+// Оплата подтверждается вручную из админки — своего платёжного шлюза нет.
+const PROMOTE_PRICE = Math.max(0, Math.round(Number(process.env.PROMOTE_PRICE)) || 1000);
+const PROMOTE_CURRENCY = CURRENCIES.includes(process.env.PROMOTE_CURRENCY) ? process.env.PROMOTE_CURRENCY : 'AMD';
+const PROMOTE_DAYS = Math.max(1, Math.round(Number(process.env.PROMOTE_DAYS)) || 7);
+const PAYMENT_INSTRUCTIONS = process.env.PAYMENT_INSTRUCTIONS || '';
+const PAYMENT_METHODS = ['idram', 'telcell', 'card', 'cash', 'other'];
+
+const ADMIN_EMAILS = new Set(
+  (process.env.ADMIN_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+);
+function isAdmin(user) { return !!user && ADMIN_EMAILS.has(String(user.email || '').toLowerCase()); }
+function adminAuth(req, res, next) {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'forbidden' });
+  next();
+}
+
 function sign(user) {
   return jwt.sign({ uid: user.id }, SECRET, { expiresIn: '30d' });
 }
 
 function publicUser(u) {
   if (!u) return null;
-  return { id: u.id, name: u.name, phone: u.phone, city: u.city, lang: u.lang, email: u.email, created_at: u.created_at };
+  return {
+    id: u.id, name: u.name, phone: u.phone, city: u.city, lang: u.lang, email: u.email,
+    created_at: u.created_at, is_admin: isAdmin(u),
+  };
 }
 
 function readToken(req) {
@@ -67,6 +87,7 @@ function softAuth(req, _res, next) {
 
 function auth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'auth_required' });
+  if (req.user.banned) return res.status(403).json({ error: 'banned' });
   next();
 }
 
@@ -144,6 +165,7 @@ app.post('/api/auth/login', wrap((req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'bad_credentials' });
   }
+  if (user.banned) return res.status(403).json({ error: 'banned' });
   res.json({ token: sign(user), user: publicUser(user) });
 }));
 
@@ -276,13 +298,14 @@ app.get('/api/listings', wrap((req, res) => {
   }
 
   const sortMap = {
-    new: 'l.created_at DESC, l.id DESC',
-    old: 'l.created_at ASC',
-    price_asc: 'l.price IS NULL, l.price ASC',
-    price_desc: 'l.price DESC',
-    popular: 'l.views DESC',
+    new: 'is_top DESC, l.created_at DESC, l.id DESC',
+    old: 'is_top DESC, l.created_at ASC',
+    price_asc: 'is_top DESC, l.price IS NULL, l.price ASC',
+    price_desc: 'is_top DESC, l.price DESC',
+    popular: 'is_top DESC, l.views DESC',
   };
   const order = sortMap[q.sort] || sortMap.new;
+  const IS_TOP_SQL = "(l.top_until IS NOT NULL AND l.top_until > datetime('now')) AS is_top";
 
   const limit = Math.min(48, Math.max(1, int(q.limit) || 24));
   const page = Math.max(1, int(q.page) || 1);
@@ -296,7 +319,7 @@ app.get('/api/listings', wrap((req, res) => {
     const mine = db.prepare('SELECT * FROM listings WHERE id = ?').get(mineId);
     if (!mine || !req.user || mine.user_id !== req.user.id) return res.status(400).json({ error: 'bad_matches' });
     const all = db
-      .prepare(`SELECT l.*, u.name owner_name FROM listings l JOIN users u ON u.id = l.user_id
+      .prepare(`SELECT l.*, u.name owner_name, ${IS_TOP_SQL} FROM listings l JOIN users u ON u.id = l.user_id
                 WHERE ${sqlWhere} AND l.user_id <> ? ORDER BY ${order}`)
       .all(...args, req.user.id);
     attachPhotos(all);
@@ -310,7 +333,7 @@ app.get('/api/listings', wrap((req, res) => {
 
   const total = db.prepare(`SELECT COUNT(*) c FROM listings l WHERE ${sqlWhere}`).get(...args).c;
   const rows = db
-    .prepare(`SELECT l.*, u.name owner_name FROM listings l JOIN users u ON u.id = l.user_id
+    .prepare(`SELECT l.*, u.name owner_name, ${IS_TOP_SQL} FROM listings l JOIN users u ON u.id = l.user_id
               WHERE ${sqlWhere} ORDER BY ${order} LIMIT ? OFFSET ?`)
     .all(...args, limit, (page - 1) * limit);
 
@@ -319,7 +342,8 @@ app.get('/api/listings', wrap((req, res) => {
 
 app.get('/api/listings/:id', wrap((req, res) => {
   const row = db
-    .prepare(`SELECT l.*, u.name owner_name, u.city owner_city, u.created_at owner_since
+    .prepare(`SELECT l.*, u.name owner_name, u.city owner_city, u.created_at owner_since,
+                     (l.top_until IS NOT NULL AND l.top_until > datetime('now')) AS is_top
               FROM listings l JOIN users u ON u.id = l.user_id WHERE l.id = ?`)
     .get(int(req.params.id));
   if (!row) return res.status(404).json({ error: 'not_found' });
@@ -513,7 +537,10 @@ app.delete('/api/listings/:id', auth, wrap((req, res) => {
 }));
 
 app.get('/api/my/listings', auth, wrap((req, res) => {
-  const rows = db.prepare('SELECT * FROM listings WHERE user_id = ? ORDER BY created_at DESC').all(req.user.id);
+  const rows = db
+    .prepare(`SELECT *, (top_until IS NOT NULL AND top_until > datetime('now')) AS is_top
+              FROM listings WHERE user_id = ? ORDER BY created_at DESC`)
+    .all(req.user.id);
   attachPhotos(rows);
   const counts = db
     .prepare(`SELECT listing_id, COUNT(*) c FROM offers WHERE status='pending' GROUP BY listing_id`)
@@ -534,7 +561,8 @@ app.post('/api/listings/:id/favorite', auth, wrap((req, res) => {
 
 app.get('/api/my/favorites', auth, wrap((req, res) => {
   const rows = db
-    .prepare(`SELECT l.*, u.name owner_name FROM favorites f JOIN listings l ON l.id=f.listing_id
+    .prepare(`SELECT l.*, u.name owner_name, (l.top_until IS NOT NULL AND l.top_until > datetime('now')) AS is_top
+              FROM favorites f JOIN listings l ON l.id=f.listing_id
               JOIN users u ON u.id=l.user_id WHERE f.user_id=? ORDER BY f.created_at DESC`)
     .all(req.user.id);
   res.json({ items: attachPhotos(rows) });
@@ -888,6 +916,149 @@ app.post('/api/push/subscribe', auth, wrap((req, res) => {
 app.post('/api/push/unsubscribe', auth, wrap((req, res) => {
   if (req.body && req.body.endpoint) db.prepare('DELETE FROM push_subs WHERE endpoint = ?').run(req.body.endpoint);
   else db.prepare('DELETE FROM push_subs WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ */
+/* монетизация: платное поднятие объявления в топ                      */
+/* ------------------------------------------------------------------ */
+
+app.get('/api/promote/info', wrap((_req, res) => {
+  res.json({ price: PROMOTE_PRICE, currency: PROMOTE_CURRENCY, days: PROMOTE_DAYS, instructions: PAYMENT_INSTRUCTIONS });
+}));
+
+app.post('/api/listings/:id/promote', auth, wrap((req, res) => {
+  const id = int(req.params.id);
+  const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  if (row.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  const pending = db.prepare("SELECT 1 FROM payments WHERE listing_id = ? AND status = 'pending'").get(id);
+  if (pending) return res.status(409).json({ error: 'payment_pending' });
+
+  const method = oneOf(req.body.method, PAYMENT_METHODS, 'other');
+  const reference = str(req.body.reference, 200);
+  const info = db
+    .prepare(`INSERT INTO payments (user_id, listing_id, amount, currency, days, method, reference)
+              VALUES (?,?,?,?,?,?,?)`)
+    .run(req.user.id, id, PROMOTE_PRICE, PROMOTE_CURRENCY, PROMOTE_DAYS, method, reference);
+  res.json({ id: info.lastInsertRowid, status: 'pending' });
+}));
+
+app.get('/api/my/payments', auth, wrap((req, res) => {
+  const items = db
+    .prepare(`SELECT p.*, l.title listing_title FROM payments p
+              JOIN listings l ON l.id = p.listing_id WHERE p.user_id = ? ORDER BY p.created_at DESC`)
+    .all(req.user.id);
+  res.json({ items });
+}));
+
+/* ------------------------------------------------------------------ */
+/* админ-панель                                                        */
+/* ------------------------------------------------------------------ */
+
+app.use('/api/admin', auth, adminAuth);
+
+app.get('/api/admin/summary', wrap((_req, res) => {
+  const users = db.prepare('SELECT COUNT(*) c FROM users').get().c;
+  const listingsActive = db.prepare("SELECT COUNT(*) c FROM listings WHERE status = 'active'").get().c;
+  const listingsTotal = db.prepare('SELECT COUNT(*) c FROM listings').get().c;
+  const topActive = db
+    .prepare("SELECT COUNT(*) c FROM listings WHERE top_until IS NOT NULL AND top_until > datetime('now')").get().c;
+  const pendingPayments = db.prepare("SELECT COUNT(*) c FROM payments WHERE status = 'pending'").get().c;
+  const revenue = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status = 'confirmed'").get().s;
+  res.json({ users, listingsActive, listingsTotal, topActive, pendingPayments, revenue, currency: PROMOTE_CURRENCY });
+}));
+
+app.get('/api/admin/payments', wrap((req, res) => {
+  const status = oneOf(req.query.status, ['pending', 'confirmed', 'rejected']);
+  const where = status ? 'WHERE p.status = ?' : '';
+  const args = status ? [status] : [];
+  const items = db
+    .prepare(`SELECT p.*, l.title listing_title, l.status listing_status, u.name user_name, u.email user_email
+              FROM payments p JOIN listings l ON l.id = p.listing_id JOIN users u ON u.id = p.user_id
+              ${where} ORDER BY p.created_at DESC LIMIT 200`)
+    .all(...args);
+  res.json({ items });
+}));
+
+app.post('/api/admin/payments/:id/confirm', wrap((req, res) => {
+  const id = int(req.params.id);
+  const p = db.prepare('SELECT * FROM payments WHERE id = ?').get(id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  if (p.status !== 'pending') return res.status(400).json({ error: 'not_pending' });
+
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE payments SET status='confirmed', confirmed_by=?, resolved_at=datetime('now') WHERE id=?")
+      .run(req.user.id, id);
+    // если объявление уже в топе — дни добавляются к остатку, а не перезаписывают его
+    db.prepare(`UPDATE listings SET top_until = datetime(
+                  CASE WHEN top_until IS NOT NULL AND top_until > datetime('now') THEN top_until ELSE datetime('now') END,
+                  '+' || ? || ' days') WHERE id = ?`)
+      .run(p.days, p.listing_id);
+  });
+  tx();
+  res.json({ ok: true });
+}));
+
+app.post('/api/admin/payments/:id/reject', wrap((req, res) => {
+  const id = int(req.params.id);
+  const p = db.prepare('SELECT * FROM payments WHERE id = ?').get(id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  if (p.status !== 'pending') return res.status(400).json({ error: 'not_pending' });
+  const note = str(req.body.note, 300);
+  db.prepare("UPDATE payments SET status='rejected', confirmed_by=?, admin_note=?, resolved_at=datetime('now') WHERE id=?")
+    .run(req.user.id, note, id);
+  res.json({ ok: true });
+}));
+
+app.get('/api/admin/listings', wrap((req, res) => {
+  const status = oneOf(req.query.status, ['active', 'hidden', 'done']);
+  const where = status ? 'WHERE l.status = ?' : '';
+  const args = status ? [status] : [];
+  const rows = db
+    .prepare(`SELECT l.*, u.name owner_name, u.email owner_email,
+                     (l.top_until IS NOT NULL AND l.top_until > datetime('now')) AS is_top
+              FROM listings l JOIN users u ON u.id = l.user_id ${where}
+              ORDER BY l.created_at DESC LIMIT 300`)
+    .all(...args);
+  res.json({ items: attachPhotos(rows) });
+}));
+
+app.post('/api/admin/listings/:id/status', wrap((req, res) => {
+  const id = int(req.params.id);
+  const status = oneOf(req.body.status, ['active', 'hidden', 'done']);
+  if (!status) return res.status(400).json({ error: 'bad_status' });
+  db.prepare("UPDATE listings SET status=?, updated_at=datetime('now') WHERE id=?").run(status, id);
+  res.json({ ok: true });
+}));
+
+app.post('/api/admin/listings/:id/untop', wrap((req, res) => {
+  db.prepare('UPDATE listings SET top_until = NULL WHERE id = ?').run(int(req.params.id));
+  res.json({ ok: true });
+}));
+
+app.delete('/api/admin/listings/:id', wrap((req, res) => {
+  const id = int(req.params.id);
+  for (const p of db.prepare('SELECT file FROM photos WHERE listing_id=?').all(id)) {
+    fs.promises.unlink(path.join(UPLOAD_DIR, p.file)).catch(() => {});
+  }
+  db.prepare('DELETE FROM listings WHERE id = ?').run(id);
+  res.json({ ok: true });
+}));
+
+app.get('/api/admin/users', wrap((_req, res) => {
+  const rows = db
+    .prepare(`SELECT u.id, u.name, u.email, u.phone, u.city, u.banned, u.created_at,
+                     (SELECT COUNT(*) FROM listings WHERE user_id = u.id) listings_count
+              FROM users u ORDER BY u.created_at DESC LIMIT 300`)
+    .all();
+  res.json({ items: rows.map((u) => ({ ...u, is_admin: ADMIN_EMAILS.has(String(u.email).toLowerCase()) })) });
+}));
+
+app.post('/api/admin/users/:id/ban', wrap((req, res) => {
+  const id = int(req.params.id);
+  if (id === req.user.id) return res.status(400).json({ error: 'cannot_ban_self' });
+  db.prepare('UPDATE users SET banned = ? WHERE id = ?').run(req.body.banned ? 1 : 0, id);
   res.json({ ok: true });
 }));
 

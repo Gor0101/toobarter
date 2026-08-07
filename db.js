@@ -196,6 +196,26 @@ CREATE TABLE IF NOT EXISTS favorites (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, listing_id)
 );
+
+-- заявки на платное поднятие объявления в топ; подтверждаются вручную админом,
+-- т.к. прямой интеграции с платёжным шлюзом (Idram/Telcell/ArCa) пока нет
+CREATE TABLE IF NOT EXISTS payments (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  listing_id   INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+  amount       INTEGER NOT NULL,
+  currency     TEXT    NOT NULL DEFAULT 'AMD',
+  days         INTEGER NOT NULL DEFAULT 7,
+  method       TEXT,
+  reference    TEXT,
+  status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
+  admin_note   TEXT,
+  confirmed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  resolved_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (user_id, created_at DESC);
 `);
 
 /* Мягкие миграции для баз, созданных прошлой версией */
@@ -205,5 +225,8 @@ function addColumn(table, column, definition) {
 }
 addColumn('offers', 'matched', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('offers', 'wish_index', 'INTEGER');
+addColumn('listings', 'top_until', 'TEXT');
+addColumn('users', 'banned', 'INTEGER NOT NULL DEFAULT 0');
+db.exec('CREATE INDEX IF NOT EXISTS idx_listings_top ON listings (top_until)');
 
 module.exports = db;
