@@ -969,6 +969,44 @@ app.get('/api/admin/summary', wrap((_req, res) => {
   res.json({ users, listingsActive, listingsTotal, topActive, pendingPayments, revenue, currency: PROMOTE_CURRENCY });
 }));
 
+app.get('/api/admin/stats/timeseries', wrap((req, res) => {
+  const days = [7, 30, 90].includes(int(req.query.days)) ? int(req.query.days) : 30;
+
+  const dailySeries = (table, extraSelect) => db
+    .prepare(`SELECT date(created_at) d, COUNT(*) c ${extraSelect || ''} FROM ${table}
+              WHERE created_at >= datetime('now', '-' || ? || ' days')
+              GROUP BY d ORDER BY d`)
+    .all(days);
+
+  const periodCount = (table, from, to, extra) => db
+    .prepare(`SELECT COUNT(*) c ${extra || ''} FROM ${table}
+              WHERE created_at >= datetime('now', '-' || ? || ' days')
+                AND created_at < datetime('now', '-' || ? || ' days')`)
+    .get(from, to);
+
+  const users = dailySeries('users');
+  const listings = dailySeries('listings');
+  const payments = dailySeries('payments', ", COALESCE(SUM(CASE WHEN status='confirmed' THEN amount ELSE 0 END),0) revenue");
+
+  const curUsers = periodCount('users', days, 0);
+  const prevUsers = periodCount('users', days * 2, days);
+  const curListings = periodCount('listings', days, 0);
+  const prevListings = periodCount('listings', days * 2, days);
+  const revExtra = ", COALESCE(SUM(CASE WHEN status='confirmed' THEN amount ELSE 0 END),0) revenue";
+  const curPayments = periodCount('payments', days, 0, revExtra);
+  const prevPayments = periodCount('payments', days * 2, days, revExtra);
+
+  res.json({
+    days,
+    series: { users, listings, payments },
+    totals: {
+      current: { users: curUsers.c, listings: curListings.c, payments: curPayments.c, revenue: curPayments.revenue },
+      previous: { users: prevUsers.c, listings: prevListings.c, payments: prevPayments.c, revenue: prevPayments.revenue },
+    },
+    currency: PROMOTE_CURRENCY,
+  });
+}));
+
 app.get('/api/admin/payments', wrap((req, res) => {
   const status = oneOf(req.query.status, ['pending', 'confirmed', 'rejected']);
   const where = status ? 'WHERE p.status = ?' : '';

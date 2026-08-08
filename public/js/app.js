@@ -45,7 +45,7 @@ async function render() {
   renderHeader();
   window.scrollTo({ top: 0 });
 
-  const guarded = ['new', 'edit', 'my', 'offers', 'chats', 'fav', 'profile', 'alerts', 'admin'];
+  const guarded = ['new', 'edit', 'my', 'offers', 'chats', 'fav', 'profile', 'alerts'];
   if (guarded.includes(page) && !App.user) {
     if (API.token) { await loadMe(); }
     if (!App.user) { toast(t('loginRequired'), true); return go('#/login'); }
@@ -62,7 +62,6 @@ async function render() {
       case 'chats': return await pageChats(parts[1]);
       case 'alerts': return await pageAlerts(parts[1]);
       case 'fav': return await pageFav();
-      case 'admin': return await pageAdmin(parts[1]);
       case 'profile': return pageProfile();
       case 'login': return pageAuth('login');
       case 'register': return pageAuth('register');
@@ -105,7 +104,7 @@ function renderHeader() {
         ['#/alerts', 'alerts', t('navAlerts'), App.summary.newMatches],
         ['#/chats', 'chats', t('navChats'), App.summary.unreadMessages],
         ['#/fav', 'fav', t('navFav'), 0],
-        ...(u.is_admin ? [['#/admin', 'admin', t('navAdmin'), 0]] : []),
+        ...(u.is_admin ? [['/admin/', 'admin', t('navAdmin'), 0]] : []),
       ]
     : [['#/', 'feed', t('navBrowse'), 0]];
 
@@ -1330,153 +1329,7 @@ async function pageChats(convId) {
   });
 }
 
-/* ---------------- страница: админ-панель ---------------- */
-
-async function pageAdmin(sub) {
-  if (!App.user || !App.user.is_admin) {
-    view().innerHTML = emptyHtml('🔒', t('forbidden'), '');
-    return;
-  }
-  sub = ['summary', 'payments', 'listings', 'users'].includes(sub) ? sub : 'summary';
-  const gen = App.gen;
-
-  view().innerHTML = `
-    <h1 style="margin-bottom:14px">${esc(t('adminTitle'))}</h1>
-    <div class="tabs">
-      <a class="tab${sub === 'summary' ? ' on' : ''}" href="#/admin/summary">${esc(t('adminSummary'))}</a>
-      <a class="tab${sub === 'payments' ? ' on' : ''}" href="#/admin/payments">${esc(t('adminPayments'))}</a>
-      <a class="tab${sub === 'listings' ? ' on' : ''}" href="#/admin/listings">${esc(t('adminListings'))}</a>
-      <a class="tab${sub === 'users' ? ' on' : ''}" href="#/admin/users">${esc(t('adminUsers'))}</a>
-    </div>
-    <div id="admin-body" class="stack"><div class="skeleton" style="height:30vh"></div></div>`;
-
-  if (sub === 'summary') return adminSummaryTab(gen);
-  if (sub === 'payments') return adminPaymentsTab(gen);
-  if (sub === 'listings') return adminListingsTab(gen);
-  return adminUsersTab(gen);
-}
-
-async function adminSummaryTab(gen) {
-  const s = await API.get('/admin/summary');
-  if (stale(gen)) return;
-  const body = document.getElementById('admin-body');
-  if (!body) return;
-  const stat = (n, label) => `<div class="panel stat"><b>${esc(n)}</b><span>${esc(label)}</span></div>`;
-  body.innerHTML = `<div class="grid-stats">
-    ${stat(s.users, t('statUsers'))}
-    ${stat(s.listingsActive, t('statActiveListings'))}
-    ${stat(s.topActive, t('statTopActive'))}
-    ${stat(s.pendingPayments, t('statPendingPayments'))}
-    ${stat(money(s.revenue, s.currency), t('statRevenue'))}
-  </div>`;
-}
-
-async function adminPaymentsTab(gen) {
-  const { items } = await API.get('/admin/payments?status=pending');
-  if (stale(gen)) return;
-  const body = document.getElementById('admin-body');
-  if (!body) return;
-  if (!items.length) { body.innerHTML = emptyHtml('✅', t('adminNoPending'), ''); return; }
-  body.innerHTML = items.map((p) => `
-    <div class="panel">
-      <div class="spread">
-        <div>
-          <b>${esc(p.listing_title)}</b>
-          <div class="small muted">${esc(p.user_name)} · ${esc(p.user_email)} · ${esc(dateFmt(p.created_at))}</div>
-        </div>
-        <span class="chip chip-brand">${esc(money(p.amount, p.currency))} · ${p.days} ${esc(t('daysShort'))}</span>
-      </div>
-      <div class="small" style="margin-top:8px">${esc(t('promoteMethod'))}: ${esc(t('method_' + p.method) || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</div>
-      <div class="row" style="margin-top:12px">
-        <a class="btn btn-sm" href="#/l/${p.listing_id}">${esc(t('openListing'))}</a>
-        <button class="btn btn-sm btn-primary" data-confirm="${p.id}">✓ ${esc(t('confirm'))}</button>
-        <button class="btn btn-sm btn-danger" data-reject="${p.id}">✕ ${esc(t('reject'))}</button>
-      </div>
-    </div>`).join('');
-  body.querySelectorAll('[data-confirm]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true;
-    try { await API.post(`/admin/payments/${b.dataset.confirm}/confirm`); toast(t('saved')); render(); }
-    catch (err) { toast(err.text, true); b.disabled = false; }
-  }));
-  body.querySelectorAll('[data-reject]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm(t('adminRejectConfirm'))) return;
-    b.disabled = true;
-    try { await API.post(`/admin/payments/${b.dataset.reject}/reject`); toast(t('saved')); render(); }
-    catch (err) { toast(err.text, true); b.disabled = false; }
-  }));
-}
-
-async function adminListingsTab(gen) {
-  const { items } = await API.get('/admin/listings');
-  if (stale(gen)) return;
-  const body = document.getElementById('admin-body');
-  if (!body) return;
-  if (!items.length) { body.innerHTML = emptyHtml('📭', t('nothingFound'), ''); return; }
-  const statusChip = (s) => {
-    const map = { active: 'chip-ok', hidden: 'chip', done: 'chip-brand' };
-    const label = { active: t('statusActive'), hidden: t('statusHidden'), done: t('statusDone') }[s];
-    return `<span class="chip ${map[s]}">${esc(label)}</span>`;
-  };
-  body.innerHTML = items.map((l) => `
-    <div class="panel">
-      <div class="row" style="align-items:flex-start">
-        <a href="#/l/${l.id}" class="mini grow">
-          ${l.photos[0] ? `<img src="${esc(l.photos[0])}" alt="">` : `<div class="ph">${l.kind === 'car' ? '🚗' : '🏠'}</div>`}
-          <div class="txt">
-            <b>${esc(l.title)}</b>
-            <span>${esc(l.owner_name)} · ${esc(l.owner_email)}</span>
-          </div>
-        </a>
-        <div class="row" style="gap:6px">
-          ${statusChip(l.status)}
-          ${l.is_top ? `<span class="chip chip-brand">🚀 ${esc(t('topBadge'))}</span>` : ''}
-        </div>
-      </div>
-      <div class="row" style="margin-top:12px">
-        ${l.status !== 'active' ? `<button class="btn btn-sm" data-st="active" data-id="${l.id}">${esc(t('activate'))}</button>` : ''}
-        ${l.status !== 'hidden' ? `<button class="btn btn-sm" data-st="hidden" data-id="${l.id}">${esc(t('hide'))}</button>` : ''}
-        ${l.is_top ? `<button class="btn btn-sm" data-untop="${l.id}">${esc(t('adminUntop'))}</button>` : ''}
-        <button class="btn btn-sm btn-danger" data-del="${l.id}">${esc(t('delete'))}</button>
-      </div>
-    </div>`).join('');
-  body.querySelectorAll('[data-st]').forEach((b) => b.addEventListener('click', async () => {
-    await API.post(`/admin/listings/${b.dataset.id}/status`, { status: b.dataset.st });
-    render();
-  }));
-  body.querySelectorAll('[data-untop]').forEach((b) => b.addEventListener('click', async () => {
-    await API.post(`/admin/listings/${b.dataset.untop}/untop`);
-    render();
-  }));
-  body.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm(t('adminDeleteConfirm'))) return;
-    await API.del(`/admin/listings/${b.dataset.del}`);
-    toast(t('saved'));
-    render();
-  }));
-}
-
-async function adminUsersTab(gen) {
-  const { items } = await API.get('/admin/users');
-  if (stale(gen)) return;
-  const body = document.getElementById('admin-body');
-  if (!body) return;
-  body.innerHTML = items.map((u) => `
-    <div class="panel">
-      <div class="spread">
-        <div>
-          <b>${esc(u.name)}</b> ${u.is_admin ? `<span class="chip chip-brand">${esc(t('navAdmin'))}</span>` : ''}
-          ${u.banned ? `<span class="chip chip-no">${esc(t('adminBanned'))}</span>` : ''}
-          <div class="small muted">${esc(u.email)} · ${esc(u.phone || '—')} · ${esc(cityName(u.city))} · ${u.listings_count} ${esc(t('navMy')).toLowerCase()}</div>
-        </div>
-        ${u.id !== App.user.id ? `<button class="btn btn-sm ${u.banned ? '' : 'btn-danger'}" data-ban="${u.id}" data-v="${u.banned ? 0 : 1}">
-          ${esc(u.banned ? t('adminUnban') : t('adminBan'))}</button>` : ''}
-      </div>
-    </div>`).join('');
-  body.querySelectorAll('[data-ban]').forEach((b) => b.addEventListener('click', async () => {
-    try { await API.post(`/admin/users/${b.dataset.ban}/ban`, { banned: b.dataset.v === '1' }); render(); }
-    catch (err) { toast(err.text, true); }
-  }));
-}
+/* Админ-панель вынесена в отдельный раздел: /admin/ (см. public/admin/). */
 
 /* ---------------- страница: профиль ---------------- */
 
