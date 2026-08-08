@@ -1130,17 +1130,32 @@ async function openPromoteModal(listingId) {
         <select id="pm-method">${methods.map(([v, lbl]) => `<option value="${esc(v)}">${esc(lbl)}</option>`).join('')}</select></div>
       <div class="field"><label>${esc(t('promoteReference'))}</label>
         <input id="pm-ref" placeholder="${esc(t('promoteReferencePh'))}" maxlength="200"></div>
+      <div class="field">
+        <label>${esc(t('promoteReceipt'))}</label>
+        <input id="pm-receipt" type="file" accept="image/jpeg,image/png,image/webp,image/avif">
+        <span class="hint">${esc(t('promoteReceiptHint'))}</span>
+      </div>
+      <div id="pm-preview"></div>
     </div>`,
     `<button class="btn" data-close="1">${esc(t('cancel'))}</button>
      <button class="btn btn-primary" id="pm-submit">${esc(t('promoteSubmit'))}</button>`);
 
+  document.getElementById('pm-receipt').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    const preview = document.getElementById('pm-preview');
+    preview.innerHTML = file ? `<div class="small muted">📎 ${esc(file.name)}</div>` : '';
+  });
+
   document.getElementById('pm-submit').addEventListener('click', async (e) => {
+    const file = document.getElementById('pm-receipt').files[0];
+    if (!file) { toast(t('err_receipt_required'), true); return; }
     e.currentTarget.disabled = true;
     try {
-      await API.post(`/listings/${listingId}/promote`, {
-        method: document.getElementById('pm-method').value,
-        reference: document.getElementById('pm-ref').value,
-      });
+      const fd = new FormData();
+      fd.append('method', document.getElementById('pm-method').value);
+      fd.append('reference', document.getElementById('pm-ref').value);
+      fd.append('receipt', file);
+      await API.form('POST', `/listings/${listingId}/promote`, fd);
       closeModal();
       toast(t('promoteSuccess'));
       render();

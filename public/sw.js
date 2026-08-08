@@ -1,7 +1,7 @@
 /* Service worker: приложение открывается без сети, данные всегда берутся свежими.
    Меняешь файлы в public/ — подними версию, старый кэш удалится сам. */
 
-const VERSION = 'toobarter-v5';   // поднимай при каждом изменении файлов в public/
+const VERSION = 'toobarter-v6';   // поднимай при каждом изменении файлов в public/
 const SHELL = VERSION + '-shell';
 const MEDIA = VERSION + '-media';
 

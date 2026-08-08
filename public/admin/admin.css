@@ -48,6 +48,17 @@ body { background: var(--bg); }
 .stat-tile .delta.flat { color: var(--muted); }
 .stat-tile .spark { margin-top: 2px; }
 
+/* ---------------- квитанция об оплате ---------------- */
+.receipt-thumb {
+  flex: 0 0 auto; width: 64px; height: 64px; border-radius: 10px;
+  overflow: hidden; border: 1px solid var(--line); display: block;
+}
+.receipt-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.receipt-thumb.receipt-missing {
+  display: grid; place-items: center; color: var(--muted); font-size: 20px;
+  background: var(--surface-2); cursor: default;
+}
+
 /* ---------------- графики ---------------- */
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 22px; }
 .chart-card .chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }

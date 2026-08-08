@@ -266,18 +266,26 @@ async function renderPayments(body) {
   }
   body.innerHTML = `<div class="stack">${items.map((p) => `
     <div class="panel">
-      <div class="spread">
-        <div>
-          <b>${esc(p.listing_title)}</b>
-          <div class="small muted">${esc(p.user_name)} · ${esc(p.user_email)} · ${esc(dateFmt(p.created_at))}</div>
+      <div class="row" style="align-items:flex-start">
+        ${p.receipt_file
+          ? `<a href="${esc(p.receipt_file)}" target="_blank" class="receipt-thumb"><img src="${esc(p.receipt_file)}" alt="Квитанция"></a>`
+          : `<div class="receipt-thumb receipt-missing" title="Квитанция не приложена">—</div>`}
+        <div class="grow">
+          <div class="spread">
+            <div>
+              <b>${esc(p.listing_title)}</b>
+              <div class="small muted">${esc(p.user_name)} · ${esc(p.user_email)} · ${esc(dateFmt(p.created_at))}</div>
+              <div class="small mono muted">объявление #${p.listing_id} · пользователь #${p.user_id}</div>
+            </div>
+            <span class="chip chip-brand">${esc(money(p.amount, p.currency))} · ${p.days} дн.</span>
+          </div>
+          <div class="small" style="margin-top:8px">Способ: ${esc(METHOD_LABEL[p.method] || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</div>
+          <div class="row" style="margin-top:12px">
+            <a class="btn btn-sm" href="/#/l/${p.listing_id}" target="_blank">Открыть объявление</a>
+            <button class="btn btn-sm btn-primary" data-confirm="${p.id}">✓ Подтвердить</button>
+            <button class="btn btn-sm btn-danger" data-reject="${p.id}">✕ Отклонить</button>
+          </div>
         </div>
-        <span class="chip chip-brand">${esc(money(p.amount, p.currency))} · ${p.days} дн.</span>
-      </div>
-      <div class="small" style="margin-top:8px">Способ: ${esc(METHOD_LABEL[p.method] || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</div>
-      <div class="row" style="margin-top:12px">
-        <a class="btn btn-sm" href="/#/l/${p.listing_id}" target="_blank">Открыть объявление</a>
-        <button class="btn btn-sm btn-primary" data-confirm="${p.id}">✓ Подтвердить</button>
-        <button class="btn btn-sm btn-danger" data-reject="${p.id}">✕ Отклонить</button>
       </div>
     </div>`).join('')}</div>`;
 

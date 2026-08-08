@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS payments (
   days         INTEGER NOT NULL DEFAULT 7,
   method       TEXT,
   reference    TEXT,
+  receipt_file TEXT,
   status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
   admin_note   TEXT,
   confirmed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -227,6 +228,7 @@ addColumn('offers', 'matched', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('offers', 'wish_index', 'INTEGER');
 addColumn('listings', 'top_until', 'TEXT');
 addColumn('users', 'banned', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('payments', 'receipt_file', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS idx_listings_top ON listings (top_until)');
 
 module.exports = db;

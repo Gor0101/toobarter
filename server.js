@@ -132,6 +132,12 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024, files: 12 },
   fileFilter: (_req, file, cb) => cb(null, Object.prototype.hasOwnProperty.call(MIME_EXT, file.mimetype)),
 });
+// отдельный аплоадер для фото квитанции при заявке на топ — один файл
+const uploadReceipt = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => cb(null, Object.prototype.hasOwnProperty.call(MIME_EXT, file.mimetype)),
+});
 
 /* ------------------------------------------------------------------ */
 /* auth                                                                */
@@ -927,20 +933,23 @@ app.get('/api/promote/info', wrap((_req, res) => {
   res.json({ price: PROMOTE_PRICE, currency: PROMOTE_CURRENCY, days: PROMOTE_DAYS, instructions: PAYMENT_INSTRUCTIONS });
 }));
 
-app.post('/api/listings/:id/promote', auth, wrap((req, res) => {
+app.post('/api/listings/:id/promote', auth, uploadReceipt.single('receipt'), wrap((req, res) => {
+  const cleanup = () => { if (req.file) fs.promises.unlink(req.file.path).catch(() => {}); };
+
   const id = int(req.params.id);
   const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(id);
-  if (!row) return res.status(404).json({ error: 'not_found' });
-  if (row.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  if (!row) { cleanup(); return res.status(404).json({ error: 'not_found' }); }
+  if (row.user_id !== req.user.id) { cleanup(); return res.status(403).json({ error: 'forbidden' }); }
   const pending = db.prepare("SELECT 1 FROM payments WHERE listing_id = ? AND status = 'pending'").get(id);
-  if (pending) return res.status(409).json({ error: 'payment_pending' });
+  if (pending) { cleanup(); return res.status(409).json({ error: 'payment_pending' }); }
+  if (!req.file) return res.status(400).json({ error: 'receipt_required' });
 
   const method = oneOf(req.body.method, PAYMENT_METHODS, 'other');
   const reference = str(req.body.reference, 200);
   const info = db
-    .prepare(`INSERT INTO payments (user_id, listing_id, amount, currency, days, method, reference)
-              VALUES (?,?,?,?,?,?,?)`)
-    .run(req.user.id, id, PROMOTE_PRICE, PROMOTE_CURRENCY, PROMOTE_DAYS, method, reference);
+    .prepare(`INSERT INTO payments (user_id, listing_id, amount, currency, days, method, reference, receipt_file)
+              VALUES (?,?,?,?,?,?,?,?)`)
+    .run(req.user.id, id, PROMOTE_PRICE, PROMOTE_CURRENCY, PROMOTE_DAYS, method, reference, req.file.filename);
   res.json({ id: info.lastInsertRowid, status: 'pending' });
 }));
 
@@ -949,6 +958,7 @@ app.get('/api/my/payments', auth, wrap((req, res) => {
     .prepare(`SELECT p.*, l.title listing_title FROM payments p
               JOIN listings l ON l.id = p.listing_id WHERE p.user_id = ? ORDER BY p.created_at DESC`)
     .all(req.user.id);
+  for (const p of items) if (p.receipt_file) p.receipt_file = '/uploads/' + p.receipt_file;
   res.json({ items });
 }));
 
@@ -1016,6 +1026,7 @@ app.get('/api/admin/payments', wrap((req, res) => {
               FROM payments p JOIN listings l ON l.id = p.listing_id JOIN users u ON u.id = p.user_id
               ${where} ORDER BY p.created_at DESC LIMIT 200`)
     .all(...args);
+  for (const p of items) if (p.receipt_file) p.receipt_file = '/uploads/' + p.receipt_file;
   res.json({ items });
 }));
 
