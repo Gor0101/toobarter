@@ -40,6 +40,24 @@ window.timeFmt = function (iso) {
 
 window.cityName = function (key) { return window.lookup(window.CITIES, key) || ''; };
 
+window.plural = function (n, one, few, many) {
+  n = Math.abs(Number(n)) || 0;
+  if (window.I18N.lang === 'en' || window.I18N.lang === 'hy') return n === 1 ? one : many;
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+};
+
+window.pluralWord = function (n, stem) {
+  return window.plural(n, window.t(stem + 'One'), window.t(stem + 'Few'), window.t(stem + 'Many'));
+};
+
+window.setTitle = function (part) {
+  document.title = part ? part + ' — TooBarter' : window.t('metaTitle');
+};
+
 /* Название категории объекта */
 window.kindName = function (l) {
   if (l.kind === 'car') return window.t('car');
@@ -78,6 +96,25 @@ window.wantedLine = function (l) {
   const kinds = (l.wanted_kinds || []).map((k) => window.t(k));
   if (l.wanted_text) kinds.push(l.wanted_text);
   return kinds.length ? kinds.join(', ') : window.t('all');
+};
+
+/* ---------- рейтинг (звёзды) ---------- */
+window.starsHtml = function (avg, count, size) {
+  if (!count) return `<span class="small muted">${esc(window.t('noReviewsYet'))}</span>`;
+  const full = Math.round(avg);
+  const stars = [1, 2, 3, 4, 5].map((i) => `<span class="${i <= full ? 'on' : ''}">★</span>`).join('');
+  return `<span class="stars${size === 'lg' ? ' lg' : ''}" aria-hidden="true">${stars}</span>
+    <span class="small muted">${esc(String(avg))} · ${count} ${esc(window.pluralWord(count, 'reviews'))}</span>`;
+};
+
+/* Интерактивный выбор оценки 1–5 для формы отзыва */
+window.starPickerHtml = function (id, value) {
+  const v = value || 0;
+  return `<div class="star-picker" id="${id}" role="radiogroup" aria-label="${esc(window.t('yourRating'))}">
+    ${[1, 2, 3, 4, 5].map((i) => `<button type="button" data-v="${i}" class="${i <= v ? 'on' : ''}"
+      role="radio" aria-checked="${i === v ? 'true' : 'false'}"
+      aria-label="${esc(window.t('starLabel', { n: i }))}">★</button>`).join('')}
+  </div>`;
 };
 
 /* ---------- тосты ---------- */

@@ -47,6 +47,25 @@ const PROMOTE_DAYS = Math.max(1, Math.round(Number(process.env.PROMOTE_DAYS)) ||
 const PAYMENT_INSTRUCTIONS = process.env.PAYMENT_INSTRUCTIONS || '';
 const PAYMENT_METHODS = ['idram', 'telcell', 'card', 'cash', 'other'];
 
+// реферальная программа: бонусные дни в топе вместо денег — и приглашающему, и новому пользователю
+const REF_BONUS_REFERRER_DAYS = Math.max(0, Math.round(Number(process.env.REF_BONUS_REFERRER_DAYS)) || 7);
+const REF_BONUS_NEWUSER_DAYS = Math.max(0, Math.round(Number(process.env.REF_BONUS_NEWUSER_DAYS)) || 3);
+
+// бесплатный лимит активных объявлений; платные тарифы для дилеров его поднимают.
+// Оплата, как и поднятие в топ, подтверждается вручную — своего платёжного шлюза нет.
+const FREE_LISTING_LIMIT = Math.max(1, Math.round(Number(process.env.FREE_LISTING_LIMIT)) || 3);
+const PACKAGE_CURRENCY = CURRENCIES.includes(process.env.PACKAGE_CURRENCY) ? process.env.PACKAGE_CURRENCY : PROMOTE_CURRENCY;
+const DEALER_PACKAGES = [
+  { code: 'start', limit: 10, price: 5000, days: 30 },
+  { code: 'pro', limit: 30, price: 12000, days: 30 },
+  { code: 'unlimited', limit: null, price: 25000, days: 30 },
+];
+
+// объявление считается «залежавшимся», если его не трогали дольше этого срока
+const STALE_DAYS = Math.max(1, Math.round(Number(process.env.STALE_LISTING_DAYS)) || 21);
+
+const REPORT_REASONS = ['spam', 'fraud', 'wrong_category', 'offensive', 'duplicate', 'other'];
+
 const ADMIN_EMAILS = new Set(
   (process.env.ADMIN_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
 );
@@ -66,6 +85,51 @@ function publicUser(u) {
     id: u.id, name: u.name, phone: u.phone, city: u.city, lang: u.lang, email: u.email,
     created_at: u.created_at, is_admin: isAdmin(u),
   };
+}
+
+/* Расширенная версия для самого пользователя (логин/регистрация/`/me`) —
+   добавляет то, что видно только владельцу аккаунта: бонусы, тариф */
+function meUser(u) {
+  if (!u) return null;
+  return {
+    ...publicUser(u),
+    bonus_top_days: u.bonus_top_days,
+    plan_code: u.plan_code,
+    plan_until: u.plan_until,
+    ref_bonus_pending: !!(u.referred_by && !u.ref_bonus_granted),
+  };
+}
+
+function genRefCode() {
+  let code;
+  do { code = crypto.randomBytes(4).toString('hex'); }
+  while (db.prepare('SELECT 1 FROM users WHERE ref_code = ?').get(code));
+  return code;
+}
+
+/* Лимит активных объявлений: тарифный план, если он ещё действует, иначе бесплатный. null = без лимита */
+function planLimit(userId) {
+  const row = db
+    .prepare("SELECT plan_limit, (plan_until IS NOT NULL AND plan_until > datetime('now')) AS active FROM users WHERE id = ?")
+    .get(userId);
+  return row && row.active ? row.plan_limit : FREE_LISTING_LIMIT;
+}
+
+function listingsTowardLimit(userId) {
+  return db
+    .prepare("SELECT COUNT(*) c FROM listings WHERE user_id = ? AND status IN ('active','hidden')")
+    .get(userId).c;
+}
+
+function listingRoomExceeded(userId) {
+  const limit = planLimit(userId);
+  if (limit !== null && listingsTowardLimit(userId) >= limit) return limit;
+  return null;
+}
+
+function userRating(userId) {
+  const row = db.prepare('SELECT COUNT(*) c, AVG(rating) a FROM reviews WHERE to_user_id = ?').get(userId);
+  return { count: row.c, avg: row.c ? Math.round(row.a * 10) / 10 : null };
 }
 
 function readToken(req) {
@@ -156,12 +220,19 @@ app.post('/api/auth/register', wrap((req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'weak_password' });
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return res.status(409).json({ error: 'email_taken' });
 
+  const referrer = str(req.body.ref, 20)
+    ? db.prepare('SELECT * FROM users WHERE ref_code = ?').get(str(req.body.ref, 20))
+    : null;
+
   const hash = bcrypt.hashSync(password, 10);
+  const refCode = genRefCode();
   const info = db
-    .prepare('INSERT INTO users (name, email, phone, password_hash, city, lang) VALUES (?,?,?,?,?,?)')
-    .run(name, email, phone, hash, city, lang);
+    .prepare(`INSERT INTO users (name, email, phone, password_hash, city, lang, ref_code, referred_by, bonus_top_days)
+              VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(name, email, phone, hash, city, lang, refCode, referrer ? referrer.id : null, 0);
+
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
-  res.json({ token: sign(user), user: publicUser(user) });
+  res.json({ token: sign(user), user: meUser(user) });
 }));
 
 app.post('/api/auth/login', wrap((req, res) => {
@@ -172,10 +243,10 @@ app.post('/api/auth/login', wrap((req, res) => {
     return res.status(401).json({ error: 'bad_credentials' });
   }
   if (user.banned) return res.status(403).json({ error: 'banned' });
-  res.json({ token: sign(user), user: publicUser(user) });
+  res.json({ token: sign(user), user: meUser(user) });
 }));
 
-app.get('/api/me', auth, wrap((req, res) => res.json({ user: publicUser(req.user) })));
+app.get('/api/me', auth, wrap((req, res) => res.json({ user: meUser(req.user) })));
 
 app.patch('/api/me', auth, wrap((req, res) => {
   const name = str(req.body.name, 80) || req.user.name;
@@ -183,7 +254,7 @@ app.patch('/api/me', auth, wrap((req, res) => {
   const city = str(req.body.city, 60);
   const lang = oneOf(req.body.lang, ['hy', 'ru', 'en'], req.user.lang);
   db.prepare('UPDATE users SET name=?, phone=?, city=?, lang=? WHERE id=?').run(name, phone, city, lang, req.user.id);
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id)) });
+  res.json({ user: meUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id)) });
 }));
 
 app.post('/api/me/password', auth, wrap((req, res) => {
@@ -193,6 +264,33 @@ app.post('/api/me/password', auth, wrap((req, res) => {
   if (next.length < 6) return res.status(400).json({ error: 'weak_password' });
   db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(bcrypt.hashSync(next, 10), req.user.id);
   res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ */
+/* реферальная программа                                               */
+/* ------------------------------------------------------------------ */
+
+app.get('/api/me/referral', auth, wrap((req, res) => {
+  const invited = db.prepare('SELECT COUNT(*) c FROM users WHERE referred_by = ?').get(req.user.id).c;
+  const qualified = db.prepare('SELECT COUNT(*) c FROM users WHERE referred_by = ? AND ref_bonus_granted = 1').get(req.user.id).c;
+  res.json({
+    code: req.user.ref_code,
+    invitedCount: invited,
+    qualifiedCount: qualified,
+    bonusTopDays: req.user.bonus_top_days,
+    bonusForFriend: REF_BONUS_NEWUSER_DAYS,
+    bonusForYou: REF_BONUS_REFERRER_DAYS,
+  });
+}));
+
+app.get('/api/users/:id/reviews', wrap((req, res) => {
+  const id = int(req.params.id);
+  const items = db
+    .prepare(`SELECT r.rating, r.comment, r.created_at, u.name from_name
+              FROM reviews r JOIN users u ON u.id = r.from_user_id
+              WHERE r.to_user_id = ? ORDER BY r.created_at DESC LIMIT 60`)
+    .all(id);
+  res.json({ items, ...userRating(id) });
 }));
 
 /* ------------------------------------------------------------------ */
@@ -372,6 +470,7 @@ app.get('/api/listings/:id', wrap((req, res) => {
   const isFavorite = req.user
     ? !!db.prepare('SELECT 1 FROM favorites WHERE user_id=? AND listing_id=?').get(req.user.id, row.id)
     : false;
+  row.owner_rating = userRating(row.user_id);
 
   res.json({ listing: row, myOffer, isFavorite, isOwner: !!req.user && req.user.id === row.user_id });
 }));
@@ -444,7 +543,27 @@ function listingValues(f) {
     f.rooms, f.floor, f.floors, f.condition, f.address];
 }
 
+/* Бонус за приглашение — только после первого объявления приглашённого, один раз */
+function grantReferralBonusIfNeeded(user) {
+  if (!user || !user.referred_by || user.ref_bonus_granted) return null;
+  return db.transaction(() => {
+    const fresh = db.prepare('SELECT id, referred_by, ref_bonus_granted FROM users WHERE id = ?').get(user.id);
+    if (!fresh || !fresh.referred_by || fresh.ref_bonus_granted) return null;
+    db.prepare('UPDATE users SET bonus_top_days = bonus_top_days + ?, ref_bonus_granted = 1 WHERE id = ?')
+      .run(REF_BONUS_NEWUSER_DAYS, fresh.id);
+    db.prepare('UPDATE users SET bonus_top_days = bonus_top_days + ? WHERE id = ?')
+      .run(REF_BONUS_REFERRER_DAYS, fresh.referred_by);
+    return { you: REF_BONUS_NEWUSER_DAYS, friend: REF_BONUS_REFERRER_DAYS };
+  })();
+}
+
 app.post('/api/listings', auth, upload.array('photos', 12), wrap((req, res) => {
+  const blocked = listingRoomExceeded(req.user.id);
+  if (blocked !== null) {
+    (req.files || []).forEach((file) => fs.promises.unlink(file.path).catch(() => {}));
+    return res.status(403).json({ error: 'listing_limit_reached', limit: blocked });
+  }
+
   let f;
   try {
     f = listingFields(req.body);
@@ -466,7 +585,8 @@ app.post('/api/listings', auth, upload.array('photos', 12), wrap((req, res) => {
 
   // тем, у кого сохранён подходящий поиск, уходит оповещение
   const notified = notifyAlerts(db.prepare('SELECT * FROM listings WHERE id = ?').get(id));
-  res.json({ id, notified });
+  const referralBonus = grantReferralBonusIfNeeded(req.user);
+  res.json({ id, notified, referralBonus });
 }));
 
 app.patch('/api/listings/:id', auth, upload.array('photos', 12), wrap((req, res) => {
@@ -523,6 +643,10 @@ app.post('/api/listings/:id/status', auth, wrap((req, res) => {
   if (!row) return res.status(404).json({ error: 'not_found' });
   if (row.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
   if (!status) return res.status(400).json({ error: 'bad_status' });
+  if (status === 'active' && row.status === 'done') {
+    const blocked = listingRoomExceeded(req.user.id);
+    if (blocked !== null) return res.status(403).json({ error: 'listing_limit_reached', limit: blocked });
+  }
   db.prepare(`UPDATE listings SET status=?, updated_at=datetime('now') WHERE id=?`).run(status, id);
   if (status === 'active' && row.status !== 'active') {
     notifyAlerts(db.prepare('SELECT * FROM listings WHERE id = ?').get(id));
@@ -552,8 +676,15 @@ app.get('/api/my/listings', auth, wrap((req, res) => {
     .prepare(`SELECT listing_id, COUNT(*) c FROM offers WHERE status='pending' GROUP BY listing_id`)
     .all();
   const map = new Map(counts.map((c) => [c.listing_id, c.c]));
-  rows.forEach((r) => (r.pending_offers = map.get(r.id) || 0));
-  res.json({ items: rows });
+  const staleBefore = new Date(Date.now() - STALE_DAYS * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  rows.forEach((r) => {
+    r.pending_offers = map.get(r.id) || 0;
+    r.nudge = r.status !== 'active' ? null
+      : !r.photos.length ? 'photos'
+      : (!r.is_top && r.updated_at < staleBefore) ? 'stale'
+      : null;
+  });
+  res.json({ items: rows, limit: planLimit(req.user.id) });
 }));
 
 /* --- избранное --- */
@@ -634,7 +765,31 @@ app.get('/api/offers', auth, wrap((req, res) => {
   const col = box === 'in' ? 'o.to_user_id' : 'o.from_user_id';
   const rows = db.prepare(`${OFFER_SELECT} WHERE ${col} = ? ORDER BY o.created_at DESC`).all(req.user.id);
   if (box === 'in') db.prepare('UPDATE offers SET seen=1 WHERE to_user_id=?').run(req.user.id);
+  attachMyReview(rows, req.user.id);
   res.json({ items: rows.map(normalizeOffer) });
+}));
+
+/* Отзыв о контрагенте — доступен только по завершённой (принятой) сделке, один раз каждой стороне.
+   Регистрируется раньше общего /:id/:action, иначе express перехватил бы "review" как action. */
+app.post('/api/offers/:id/review', auth, wrap((req, res) => {
+  const id = int(req.params.id);
+  const offer = db.prepare('SELECT * FROM offers WHERE id = ?').get(id);
+  if (!offer) return res.status(404).json({ error: 'not_found' });
+  if (offer.status !== 'accepted') return res.status(400).json({ error: 'not_accepted' });
+  if (offer.from_user_id !== req.user.id && offer.to_user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+
+  const rating = int(req.body.rating);
+  if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'bad_rating' });
+  const toUserId = offer.from_user_id === req.user.id ? offer.to_user_id : offer.from_user_id;
+  const comment = str(req.body.comment, 1000);
+
+  try {
+    db.prepare('INSERT INTO reviews (offer_id, from_user_id, to_user_id, rating, comment) VALUES (?,?,?,?,?)')
+      .run(id, req.user.id, toUserId, rating, comment);
+  } catch {
+    return res.status(409).json({ error: 'already_reviewed' });
+  }
+  res.json({ ok: true });
 }));
 
 app.post('/api/offers/:id/:action', auth, wrap((req, res) => {
@@ -681,6 +836,12 @@ app.post('/api/offers/:id/:action', auth, wrap((req, res) => {
   res.status(400).json({ error: 'bad_action' });
 }));
 
+function attachMyReview(offers, userId) {
+  const stmt = db.prepare('SELECT rating FROM reviews WHERE offer_id=? AND from_user_id=?');
+  for (const o of offers) o.my_review = (stmt.get(o.id, userId) || {}).rating ?? null;
+  return offers;
+}
+
 /* ------------------------------------------------------------------ */
 /* чат (доступен только после принятого предложения)                   */
 /* ------------------------------------------------------------------ */
@@ -724,6 +885,7 @@ app.get('/api/conversations/:id/messages', auth, wrap((req, res) => {
   const peerId = c.user_a === req.user.id ? c.user_b : c.user_a;
   const peer = publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(peerId));
   const offer = normalizeOffer(db.prepare(`${OFFER_SELECT} WHERE o.id = ?`).get(c.offer_id));
+  attachMyReview([offer], req.user.id);
   res.json({ items: rows, peer, offer, me: req.user.id });
 }));
 
@@ -786,12 +948,19 @@ function parseAlert(b) {
   };
 }
 
+const PUSH_TITLE = {
+  hy: 'Գտնվեց ըստ քո որոնման',
+  ru: 'Нашлось по твоему поиску',
+  en: 'Found for your search',
+};
+
 function sendPush(userId, listing) {
   if (!webpush) return;
   const subs = db.prepare('SELECT * FROM push_subs WHERE user_id = ?').all(userId);
   if (!subs.length) return;
+  const lang = (db.prepare('SELECT lang FROM users WHERE id = ?').get(userId) || {}).lang;
   const payload = JSON.stringify({
-    title: 'TooBarter',
+    title: PUSH_TITLE[lang] || PUSH_TITLE.ru,
     body: listing.title,
     url: '/#/l/' + listing.id,
     tag: 'listing-' + listing.id,
@@ -926,6 +1095,77 @@ app.post('/api/push/unsubscribe', auth, wrap((req, res) => {
 }));
 
 /* ------------------------------------------------------------------ */
+/* жалобы на объявление или пользователя                               */
+/* ------------------------------------------------------------------ */
+
+app.post('/api/reports', auth, wrap((req, res) => {
+  const listingId = int(req.body.listing_id) || null;
+  let reportedUserId = int(req.body.reported_user_id) || null;
+  if (!listingId && !reportedUserId) return res.status(400).json({ error: 'bad_target' });
+  const reason = oneOf(req.body.reason, REPORT_REASONS);
+  if (!reason) return res.status(400).json({ error: 'bad_reason' });
+
+  if (listingId) {
+    const listing = db.prepare('SELECT id, user_id FROM listings WHERE id = ?').get(listingId);
+    if (!listing) return res.status(404).json({ error: 'listing_not_found' });
+    if (listing.user_id === req.user.id) return res.status(400).json({ error: 'cannot_report_own' });
+    reportedUserId = listing.user_id;
+  } else if (reportedUserId === req.user.id) {
+    return res.status(400).json({ error: 'cannot_report_own' });
+  }
+
+  const dup = listingId
+    ? db.prepare("SELECT 1 FROM reports WHERE reporter_id=? AND listing_id=? AND status='pending'")
+      .get(req.user.id, listingId)
+    : db.prepare("SELECT 1 FROM reports WHERE reporter_id=? AND reported_user_id=? AND listing_id IS NULL AND status='pending'")
+      .get(req.user.id, reportedUserId);
+  if (dup) return res.status(409).json({ error: 'already_reported' });
+
+  const info = db
+    .prepare('INSERT INTO reports (reporter_id, listing_id, reported_user_id, reason, comment) VALUES (?,?,?,?,?)')
+    .run(req.user.id, listingId, reportedUserId, reason, str(req.body.comment, 1000));
+  res.json({ id: info.lastInsertRowid });
+}));
+
+/* ------------------------------------------------------------------ */
+/* тарифные пакеты для дилеров (расширяют лимит активных объявлений)   */
+/* ------------------------------------------------------------------ */
+
+app.get('/api/packages', wrap((req, res) => {
+  const current = req.user
+    ? { code: req.user.plan_code, until: req.user.plan_until, limit: planLimit(req.user.id) }
+    : { code: null, until: null, limit: FREE_LISTING_LIMIT };
+  const pending = req.user
+    ? db.prepare("SELECT package_code, created_at FROM package_orders WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC")
+      .get(req.user.id)
+    : null;
+  res.json({ items: DEALER_PACKAGES, currency: PACKAGE_CURRENCY, freeLimit: FREE_LISTING_LIMIT, current, pending });
+}));
+
+app.post('/api/packages/:code/order', auth, uploadReceipt.single('receipt'), wrap((req, res) => {
+  const cleanup = () => { if (req.file) fs.promises.unlink(req.file.path).catch(() => {}); };
+  const pkg = DEALER_PACKAGES.find((p) => p.code === req.params.code);
+  if (!pkg) { cleanup(); return res.status(404).json({ error: 'not_found' }); }
+  const pending = db.prepare("SELECT 1 FROM package_orders WHERE user_id = ? AND status = 'pending'").get(req.user.id);
+  if (pending) { cleanup(); return res.status(409).json({ error: 'package_pending' }); }
+  if (!req.file) return res.status(400).json({ error: 'receipt_required' });
+
+  const method = oneOf(req.body.method, PAYMENT_METHODS, 'other');
+  const reference = str(req.body.reference, 200);
+  const info = db
+    .prepare(`INSERT INTO package_orders (user_id, package_code, amount, currency, days, listing_limit, method, reference, receipt_file)
+              VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(req.user.id, pkg.code, pkg.price, PACKAGE_CURRENCY, pkg.days, pkg.limit, method, reference, req.file.filename);
+  res.json({ id: info.lastInsertRowid, status: 'pending' });
+}));
+
+app.get('/api/my/packages', auth, wrap((req, res) => {
+  const items = db.prepare('SELECT * FROM package_orders WHERE user_id = ? ORDER BY created_at DESC').all(req.user.id);
+  for (const p of items) if (p.receipt_file) p.receipt_file = '/uploads/' + p.receipt_file;
+  res.json({ items });
+}));
+
+/* ------------------------------------------------------------------ */
 /* монетизация: платное поднятие объявления в топ                      */
 /* ------------------------------------------------------------------ */
 
@@ -953,6 +1193,28 @@ app.post('/api/listings/:id/promote', auth, uploadReceipt.single('receipt'), wra
   res.json({ id: info.lastInsertRowid, status: 'pending' });
 }));
 
+/* Поднятие в топ за бонусные дни, накопленные по реферальной программе — без квитанции и без админа */
+app.post('/api/listings/:id/promote/bonus', auth, wrap((req, res) => {
+  const id = int(req.params.id);
+  const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  if (row.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  if (req.user.bonus_top_days < PROMOTE_DAYS) return res.status(400).json({ error: 'not_enough_bonus' });
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE users SET bonus_top_days = bonus_top_days - ? WHERE id = ?').run(PROMOTE_DAYS, req.user.id);
+    db.prepare(`UPDATE listings SET top_until = datetime(
+                  CASE WHEN top_until IS NOT NULL AND top_until > datetime('now') THEN top_until ELSE datetime('now') END,
+                  '+' || ? || ' days') WHERE id = ?`).run(PROMOTE_DAYS, id);
+    db.prepare(`INSERT INTO payments (user_id, listing_id, amount, currency, days, method, status, confirmed_by, resolved_at)
+                VALUES (?,?,0,?,?,'bonus','confirmed',NULL,datetime('now'))`)
+      .run(req.user.id, id, PROMOTE_CURRENCY, PROMOTE_DAYS);
+  });
+  tx();
+  const left = db.prepare('SELECT bonus_top_days FROM users WHERE id = ?').get(req.user.id).bonus_top_days;
+  res.json({ ok: true, days: PROMOTE_DAYS, bonus_top_days: left });
+}));
+
 app.get('/api/my/payments', auth, wrap((req, res) => {
   const items = db
     .prepare(`SELECT p.*, l.title listing_title FROM payments p
@@ -976,7 +1238,12 @@ app.get('/api/admin/summary', wrap((_req, res) => {
     .prepare("SELECT COUNT(*) c FROM listings WHERE top_until IS NOT NULL AND top_until > datetime('now')").get().c;
   const pendingPayments = db.prepare("SELECT COUNT(*) c FROM payments WHERE status = 'pending'").get().c;
   const revenue = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status = 'confirmed'").get().s;
-  res.json({ users, listingsActive, listingsTotal, topActive, pendingPayments, revenue, currency: PROMOTE_CURRENCY });
+  const pendingReports = db.prepare("SELECT COUNT(*) c FROM reports WHERE status = 'pending'").get().c;
+  const pendingPackages = db.prepare("SELECT COUNT(*) c FROM package_orders WHERE status = 'pending'").get().c;
+  res.json({
+    users, listingsActive, listingsTotal, topActive, pendingPayments, revenue, currency: PROMOTE_CURRENCY,
+    pendingReports, pendingPackages,
+  });
 }));
 
 app.get('/api/admin/stats/timeseries', wrap((req, res) => {
@@ -1095,6 +1362,74 @@ app.delete('/api/admin/listings/:id', wrap((req, res) => {
   res.json({ ok: true });
 }));
 
+app.get('/api/admin/reports', wrap((req, res) => {
+  const status = oneOf(req.query.status, ['pending', 'resolved', 'dismissed'], 'pending');
+  const items = db
+    .prepare(`SELECT r.*, u.name reporter_name, u.email reporter_email,
+                     l.title listing_title, l.status listing_status,
+                     ru.name reported_name, ru.email reported_email, ru.banned reported_banned
+              FROM reports r
+              JOIN users u ON u.id = r.reporter_id
+              LEFT JOIN listings l ON l.id = r.listing_id
+              LEFT JOIN users ru ON ru.id = r.reported_user_id
+              WHERE r.status = ? ORDER BY r.created_at DESC LIMIT 200`)
+    .all(status);
+  res.json({ items });
+}));
+
+app.post('/api/admin/reports/:id/resolve', wrap((req, res) => {
+  const id = int(req.params.id);
+  db.prepare("UPDATE reports SET status='resolved', resolved_by=?, resolved_at=datetime('now') WHERE id=?")
+    .run(req.user.id, id);
+  res.json({ ok: true });
+}));
+
+app.post('/api/admin/reports/:id/dismiss', wrap((req, res) => {
+  const id = int(req.params.id);
+  db.prepare("UPDATE reports SET status='dismissed', resolved_by=?, resolved_at=datetime('now') WHERE id=?")
+    .run(req.user.id, id);
+  res.json({ ok: true });
+}));
+
+app.get('/api/admin/packages', wrap((req, res) => {
+  const status = oneOf(req.query.status, ['pending', 'confirmed', 'rejected'], 'pending');
+  const items = db
+    .prepare(`SELECT p.*, u.name user_name, u.email user_email FROM package_orders p
+              JOIN users u ON u.id = p.user_id WHERE p.status = ? ORDER BY p.created_at DESC LIMIT 200`)
+    .all(status);
+  for (const p of items) if (p.receipt_file) p.receipt_file = '/uploads/' + p.receipt_file;
+  res.json({ items });
+}));
+
+app.post('/api/admin/packages/:id/confirm', wrap((req, res) => {
+  const id = int(req.params.id);
+  const p = db.prepare('SELECT * FROM package_orders WHERE id = ?').get(id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  if (p.status !== 'pending') return res.status(400).json({ error: 'not_pending' });
+
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE package_orders SET status='confirmed', confirmed_by=?, resolved_at=datetime('now') WHERE id=?")
+      .run(req.user.id, id);
+    db.prepare(`UPDATE users SET plan_code=?, plan_limit=?, plan_until = datetime(
+                  CASE WHEN plan_until IS NOT NULL AND plan_until > datetime('now') THEN plan_until ELSE datetime('now') END,
+                  '+' || ? || ' days') WHERE id = ?`)
+      .run(p.package_code, p.listing_limit, p.days, p.user_id);
+  });
+  tx();
+  res.json({ ok: true });
+}));
+
+app.post('/api/admin/packages/:id/reject', wrap((req, res) => {
+  const id = int(req.params.id);
+  const p = db.prepare('SELECT * FROM package_orders WHERE id = ?').get(id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  if (p.status !== 'pending') return res.status(400).json({ error: 'not_pending' });
+  const note = str(req.body.note, 300);
+  db.prepare("UPDATE package_orders SET status='rejected', confirmed_by=?, admin_note=?, resolved_at=datetime('now') WHERE id=?")
+    .run(req.user.id, note, id);
+  res.json({ ok: true });
+}));
+
 app.get('/api/admin/users', wrap((_req, res) => {
   const rows = db
     .prepare(`SELECT u.id, u.name, u.email, u.phone, u.city, u.banned, u.created_at,
@@ -1133,6 +1468,110 @@ app.get('/api/summary', auth, wrap((req, res) => {
 }));
 
 /* ------------------------------------------------------------------ */
+/* SEO: серверный рендер карточки объявления по стабильному пути,      */
+/* превью для соцсетей/мессенджеров и sitemap для поисковиков.         */
+/* Внутри приложения ссылки на объявление остаются хеш-маршрутом       */
+/* (#/l/:id) — этот путь существует специально для внешних ссылок.     */
+/* ------------------------------------------------------------------ */
+
+/* Русское название города для SSR-описания: справочник живёт в public/js/catalog.js
+   как window.CITIES (браузерный глобал), поэтому подгружаем его в изолированный sandbox */
+const cityNameRu = (() => {
+  try {
+    const vm = require('vm');
+    const sandbox = { window: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'public/js/catalog.js'), 'utf8'), sandbox);
+    const map = new Map((sandbox.window.CITIES || []).map((row) => [row[0], row[2]]));
+    return (code) => map.get(code) || code || '';
+  } catch {
+    return (code) => code || '';
+  }
+})();
+
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function siteOrigin(req) {
+  return process.env.SITE_ORIGIN || `${req.protocol}://${req.get('host')}`;
+}
+
+app.get('/l/:id', wrap((req, res) => {
+  const row = db
+    .prepare(`SELECT l.*, u.name owner_name FROM listings l JOIN users u ON u.id = l.user_id WHERE l.id = ?`)
+    .get(int(req.params.id));
+  if (!row || row.status !== 'active') {
+    res.status(404);
+    return res.send(`<!doctype html><html lang="ru"><head><meta charset="utf-8">
+      <title>${escHtml(t404())}</title><link rel="stylesheet" href="/css/app.css"></head>
+      <body><div class="empty" style="margin:60px auto"><div class="ico">🤷</div><h3>${escHtml(t404())}</h3>
+      <a class="btn btn-primary" href="/">На главную</a></div></body></html>`);
+  }
+  function t404() { return 'Объявление не найдено или снято с публикации'; }
+
+  const photos = db.prepare('SELECT file FROM photos WHERE listing_id = ? ORDER BY sort, id').all(row.id).map((p) => '/uploads/' + p.file);
+  const origin = siteOrigin(req);
+  const url = `${origin}/l/${row.id}`;
+  const priceTxt = row.price ? `${Number(row.price).toLocaleString('ru-RU')} ${row.currency}` : '';
+  const descRaw = (row.description || '').replace(/\s+/g, ' ').trim();
+  const metaDesc = (priceTxt ? priceTxt + ' · ' : '') + (descRaw || row.title);
+  const image = photos[0] ? origin + photos[0] : origin + '/icons/icon-512.png';
+
+  const specs = row.kind === 'car'
+    ? [row.year, row.mileage ? Number(row.mileage).toLocaleString('ru-RU') + ' км' : null, row.transmission, row.fuel]
+    : [row.realty_type, row.area ? row.area + ' м²' : null, row.rooms ? row.rooms + ' комн.' : null];
+
+  res.send(`<!doctype html><html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(row.title)} — TooBarter</title>
+<meta name="description" content="${escHtml(metaDesc.slice(0, 300))}">
+<link rel="canonical" href="${escHtml(url)}">
+<meta property="og:type" content="product">
+<meta property="og:title" content="${escHtml(row.title)}">
+<meta property="og:description" content="${escHtml(metaDesc.slice(0, 300))}">
+<meta property="og:url" content="${escHtml(url)}">
+<meta property="og:image" content="${escHtml(image)}">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="/css/app.css">
+</head><body>
+<div style="max-width:820px;margin:0 auto;padding:16px">
+  <a href="/" style="display:inline-flex;align-items:center;gap:8px;margin-bottom:16px;font-weight:800;color:inherit;text-decoration:none">
+    <span style="font-size:20px">⇄</span> TooBarter</a>
+  <div class="panel">
+    ${photos.length ? `<img src="${escHtml(photos[0])}" alt="${escHtml(row.title)}" style="width:100%;border-radius:12px;margin-bottom:14px;max-height:420px;object-fit:cover">` : ''}
+    <h1 style="margin-bottom:6px">${escHtml(row.title)}</h1>
+    <div class="small muted">${escHtml(specs.filter(Boolean).join(' · '))}${row.city ? ' · ' + escHtml(cityNameRu(row.city)) : ''}</div>
+    ${priceTxt ? `<div class="price-big" style="margin-top:12px">${escHtml(priceTxt)}</div>` : ''}
+    ${descRaw ? `<p style="margin-top:14px;white-space:pre-wrap">${escHtml(descRaw)}</p>` : ''}
+    ${photos.length > 1 ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      ${photos.slice(1, 6).map((p) => `<img src="${escHtml(p)}" alt="" style="width:84px;height:84px;object-fit:cover;border-radius:8px">`).join('')}
+    </div>` : ''}
+    <a class="btn btn-primary btn-lg btn-block" style="margin-top:18px" href="/#/l/${row.id}">Открыть в приложении ⇄</a>
+  </div>
+  <p class="small muted" style="margin-top:14px">Владелец: ${escHtml(row.owner_name)}. Предложить обмен и написать в чат можно только в приложении.</p>
+</div>
+</body></html>`);
+}));
+
+app.get('/sitemap.xml', wrap((req, res) => {
+  const origin = siteOrigin(req);
+  const rows = db.prepare("SELECT id, updated_at FROM listings WHERE status = 'active' ORDER BY id DESC LIMIT 5000").all();
+  const urls = [
+    `<url><loc>${escHtml(origin)}/</loc></url>`,
+    ...rows.map((r) => `<url><loc>${escHtml(origin)}/l/${r.id}</loc><lastmod>${escHtml((r.updated_at || '').slice(0, 10))}</lastmod></url>`),
+  ];
+  res.type('application/xml').send(
+    `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.join('')}</urlset>`
+  );
+}));
+
+app.get('/robots.txt', wrap((req, res) => {
+  res.type('text/plain').send(
+    `User-agent: *\nAllow: /\nDisallow: /admin/\nDisallow: /api/\nSitemap: ${siteOrigin(req)}/sitemap.xml\n`
+  );
+}));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'unknown_endpoint' }));
 

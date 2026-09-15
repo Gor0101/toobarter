@@ -126,6 +126,8 @@ function renderLogin(notice) {
 const TABS = [
   ['overview', 'Обзор'],
   ['payments', 'Оплаты'],
+  ['packages', 'Тарифы'],
+  ['reports', 'Жалобы'],
   ['listings', 'Объявления'],
   ['users', 'Пользователи'],
 ];
@@ -170,7 +172,10 @@ function renderTab() {
   const body = document.getElementById('a-body');
   if (!body) return;
   body.innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
-  const fns = { overview: renderOverview, payments: renderPayments, listings: renderListings, users: renderUsers };
+  const fns = {
+    overview: renderOverview, payments: renderPayments, packages: renderPackages,
+    reports: renderReports, listings: renderListings, users: renderUsers,
+  };
   fns[currentTab()](body).catch((e) => {
     body.innerHTML = `<div class="empty"><div class="ico">⚠️</div><h3>Ошибка</h3><p>${esc(errText(e.message))}</p></div>`;
   });
@@ -220,6 +225,8 @@ async function renderOverview(body) {
       ${statTile('Активных объявлений', summary.listingsActive, null, [], 'var(--brand)')}
       ${statTile('Сейчас в топе', summary.topActive, null, [], 'var(--brand)')}
       ${statTile('Оплат на проверке', summary.pendingPayments, null, [], 'var(--brand)')}
+      ${statTile('Тарифов на проверке', summary.pendingPackages, null, [], 'var(--brand)')}
+      ${statTile('Жалоб на проверке', summary.pendingReports, null, [], 'var(--brand)')}
       ${statTile('Новых пользователей', ts.totals.current.users, pctDelta(ts.totals.current.users, ts.totals.previous.users), users, 'var(--brand)')}
       ${statTile('Новых объявлений', ts.totals.current.listings, pctDelta(ts.totals.current.listings, ts.totals.previous.listings), listings, 'var(--brand)')}
       ${statTile('Выручка · ' + range + ' дн.', money(ts.totals.current.revenue, ts.currency), pctDelta(ts.totals.current.revenue, ts.totals.previous.revenue), revenue, 'var(--plus)')}
@@ -299,6 +306,104 @@ async function renderPayments(body) {
     b.disabled = true;
     try { await api('POST', `/admin/payments/${b.dataset.reject}/reject`); toast('Отклонено'); renderTab(); }
     catch (e) { toast(errText(e.message), true); b.disabled = false; }
+  }));
+}
+
+/* ---------------- вкладка: тарифы для дилеров ---------------- */
+
+const PLAN_LABEL = { start: 'Старт (10 объявлений)', pro: 'Про (30 объявлений)', unlimited: 'Безлимит' };
+
+async function renderPackages(body) {
+  const { items } = await api('GET', '/admin/packages?status=pending');
+  if (!items.length) {
+    body.innerHTML = `<div class="empty"><div class="ico">✅</div><h3>Нет заявок на тарифы</h3></div>`;
+    return;
+  }
+  body.innerHTML = `<div class="stack">${items.map((p) => `
+    <div class="panel">
+      <div class="row" style="align-items:flex-start">
+        ${p.receipt_file
+          ? `<a href="${esc(p.receipt_file)}" target="_blank" class="receipt-thumb"><img src="${esc(p.receipt_file)}" alt="Квитанция"></a>`
+          : `<div class="receipt-thumb receipt-missing" title="Квитанция не приложена">—</div>`}
+        <div class="grow">
+          <div class="spread">
+            <div>
+              <b>${esc(PLAN_LABEL[p.package_code] || p.package_code)}</b>
+              <div class="small muted">${esc(p.user_name)} · ${esc(p.user_email)} · ${esc(dateFmt(p.created_at))}</div>
+            </div>
+            <span class="chip chip-brand">${esc(money(p.amount, p.currency))} · ${p.days} дн.</span>
+          </div>
+          <div class="small" style="margin-top:8px">Способ: ${esc(METHOD_LABEL[p.method] || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn btn-sm btn-primary" data-confirm="${p.id}">✓ Подтвердить</button>
+            <button class="btn btn-sm btn-danger" data-reject="${p.id}">✕ Отклонить</button>
+          </div>
+        </div>
+      </div>
+    </div>`).join('')}</div>`;
+
+  body.querySelectorAll('[data-confirm]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await api('POST', `/admin/packages/${b.dataset.confirm}/confirm`); toast('Подтверждено'); renderTab(); }
+    catch (e) { toast(errText(e.message), true); b.disabled = false; }
+  }));
+  body.querySelectorAll('[data-reject]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Отклонить эту заявку?')) return;
+    b.disabled = true;
+    try { await api('POST', `/admin/packages/${b.dataset.reject}/reject`); toast('Отклонено'); renderTab(); }
+    catch (e) { toast(errText(e.message), true); b.disabled = false; }
+  }));
+}
+
+/* ---------------- вкладка: жалобы ---------------- */
+
+const REASON_LABEL = {
+  spam: 'Спам / реклама', fraud: 'Похоже на обман', wrong_category: 'Неверная категория',
+  offensive: 'Неприемлемый контент', duplicate: 'Дубликат', other: 'Другое',
+};
+
+async function renderReports(body) {
+  const { items } = await api('GET', '/admin/reports?status=pending');
+  if (!items.length) {
+    body.innerHTML = `<div class="empty"><div class="ico">✅</div><h3>Нет жалоб на проверке</h3></div>`;
+    return;
+  }
+  body.innerHTML = `<div class="stack">${items.map((r) => `
+    <div class="panel">
+      <div class="spread">
+        <div>
+          <span class="chip chip-brand">${esc(REASON_LABEL[r.reason] || r.reason)}</span>
+          <div class="small muted" style="margin-top:6px">От ${esc(r.reporter_name)} · ${esc(r.reporter_email)} · ${esc(dateFmt(r.created_at))}</div>
+        </div>
+      </div>
+      ${r.comment ? `<p class="small" style="margin-top:8px">${esc(r.comment)}</p>` : ''}
+      <div class="small" style="margin-top:8px">
+        ${r.listing_id ? `На объявление: <b>${esc(r.listing_title)}</b> (#${r.listing_id})` : ''}
+        ${r.reported_user_id ? `На пользователя: <b>${esc(r.reported_name)}</b> · ${esc(r.reported_email)}` : ''}
+      </div>
+      <div class="row" style="margin-top:12px">
+        ${r.listing_id ? `<a class="btn btn-sm" href="/#/l/${r.listing_id}" target="_blank">Открыть объявление</a>
+          ${r.listing_status === 'active' ? `<button class="btn btn-sm" data-hide-listing="${r.listing_id}">Скрыть объявление</button>` : ''}` : ''}
+        ${r.reported_user_id && !r.reported_banned ? `<button class="btn btn-sm btn-danger" data-ban-user="${r.reported_user_id}">Заблокировать пользователя</button>` : ''}
+        <button class="btn btn-sm btn-primary" data-resolve="${r.id}">✓ Решено</button>
+        <button class="btn btn-sm" data-dismiss="${r.id}">Отклонить</button>
+      </div>
+    </div>`).join('')}</div>`;
+
+  body.querySelectorAll('[data-hide-listing]').forEach((b) => b.addEventListener('click', async () => {
+    await api('POST', `/admin/listings/${b.dataset.hideListing}/status`, { status: 'hidden' });
+    toast('Объявление скрыто'); renderTab();
+  }));
+  body.querySelectorAll('[data-ban-user]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Заблокировать этого пользователя?')) return;
+    await api('POST', `/admin/users/${b.dataset.banUser}/ban`, { banned: true });
+    toast('Пользователь заблокирован'); renderTab();
+  }));
+  body.querySelectorAll('[data-resolve]').forEach((b) => b.addEventListener('click', async () => {
+    await api('POST', `/admin/reports/${b.dataset.resolve}/resolve`); renderTab();
+  }));
+  body.querySelectorAll('[data-dismiss]').forEach((b) => b.addEventListener('click', async () => {
+    await api('POST', `/admin/reports/${b.dataset.dismiss}/dismiss`); renderTab();
   }));
 }
 

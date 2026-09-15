@@ -574,6 +574,7 @@ h3 { font-size: 17px; }
 .fit-note { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 12px; }
 .fit-note.ok { background: var(--plus-tint); color: var(--plus); }
 .fit-note.no { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
+.fit-note.wait { background: #fff6e5; color: #8a5a00; }
 
 /* отметка на карточке в ленте */
 .card-fit {
@@ -800,3 +801,26 @@ h3 { font-size: 17px; }
 @media (min-width: 721px) {
   .btn-save-search .lbl { display: inline; }
 }
+
+/* ---------- ссылка-кнопка (рейтинг, жалоба) ---------- */
+.btn-link {
+  background: none; border: none; padding: 0; margin: 0; cursor: pointer;
+  font: inherit; color: var(--brand); text-align: left; display: inline-flex; align-items: center; gap: 6px;
+}
+.btn-link:hover { text-decoration: underline; }
+
+/* ---------- рейтинг звёздами ---------- */
+.stars { color: var(--line-2); font-size: 15px; letter-spacing: 1px; }
+.stars.lg { font-size: 22px; }
+.stars span.on { color: #e0a300; }
+
+.star-picker { display: flex; gap: 4px; }
+.star-picker button {
+  background: none; border: none; cursor: pointer; font-size: 28px; line-height: 1;
+  color: var(--line-2); padding: 2px; transition: transform .12s, color .12s;
+}
+.star-picker button:hover, .star-picker button:focus-visible { color: #e0a300; transform: scale(1.12); }
+.star-picker button.on { color: #e0a300; }
+
+.review { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.review:last-child { border-bottom: none; }

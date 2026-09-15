@@ -36,6 +36,8 @@ function clearTimers() {
   App.timers = [];
 }
 
+const GUARDED = ['new', 'edit', 'my', 'offers', 'chats', 'fav', 'profile', 'alerts', 'packages'];
+
 async function render() {
   App.gen++;
   clearTimers();
@@ -45,10 +47,20 @@ async function render() {
   renderHeader();
   window.scrollTo({ top: 0 });
 
-  const guarded = ['new', 'edit', 'my', 'offers', 'chats', 'fav', 'profile', 'alerts'];
-  if (guarded.includes(page) && !App.user) {
+  const titles = {
+    feed: t('navBrowse'), my: t('navMy'), offers: t('navOffers'), chats: t('chats'),
+    alerts: t('navAlerts'), fav: t('navFav'), profile: t('profileTitle'),
+    packages: t('packagesTitle'), new: t('heroCta'), edit: t('edit'),
+    login: t('loginTitle'), register: t('registerTitle'),
+  };
+  setTitle(titles[page] || '');
+
+  if (GUARDED.includes(page) && !App.user) {
     if (API.token) { await loadMe(); }
-    if (!App.user) { toast(t('loginRequired'), true); return go('#/login'); }
+    if (!App.user) {
+      try { sessionStorage.setItem('afterLogin', location.hash || '#/'); } catch { /* private mode */ }
+      toast(t('loginRequired'), true); return go('#/login');
+    }
   }
 
   try {
@@ -63,8 +75,9 @@ async function render() {
       case 'alerts': return await pageAlerts(parts[1]);
       case 'fav': return await pageFav();
       case 'profile': return pageProfile();
+      case 'packages': return await pagePackages();
       case 'login': return pageAuth('login');
-      case 'register': return pageAuth('register');
+      case 'register': return pageAuth('register', query.get('ref'));
       default:
         view().innerHTML = `<div class="empty"><div class="ico">🤷</div><h3>${t('notFound')}</h3>
           <a class="btn btn-primary" href="#/">${t('navBrowse')}</a></div>`;
@@ -359,7 +372,7 @@ function heroHtml() {
       <a class="btn btn-primary btn-lg" href="#/new">${esc(t('heroCta'))}</a>
       <a class="btn btn-lg" href="#/?kind=car" style="background:rgba(255,255,255,.1);color:#fff">${esc(t('heroBrowse'))}</a>
     </div>
-    <div class="hero-steps">
+    <div class="hero-steps" aria-label="${esc(t('howTitle'))}">
       <div class="hero-step"><b>01</b><span>${esc(t('how1'))}</span></div>
       <div class="hero-step"><b>02</b><span>${esc(t('how2'))}</span></div>
       <div class="hero-step"><b>03</b><span>${esc(t('how3'))}</span></div>
@@ -375,6 +388,7 @@ async function pageListing(id) {
   const data = await API.get('/listings/' + id);
   if (stale(gen)) return;
   const l = data.listing;
+  setTitle(l.title);
   let photoIdx = 0;
 
   const specs = [];
@@ -418,13 +432,13 @@ async function pageListing(id) {
   };
 
   view().innerHTML = `
-    <a class="btn btn-ghost btn-sm" href="javascript:history.back()" style="margin-bottom:12px">← ${esc(t('back'))}</a>
+    <a class="btn btn-ghost btn-sm" href="#/" style="margin-bottom:12px">← ${esc(t('back'))}</a>
     <div class="listing">
       <div class="stack">
         <div class="gallery" id="gallery"></div>
         <div class="panel">
           <h2 style="margin-bottom:6px">${esc(l.title)}</h2>
-          <div class="small muted">${esc(specLine(l))} · ${esc(t('published'))} ${esc(dateFmt(l.created_at))} · ${l.views} ${esc(t('views'))}</div>
+          <div class="small muted">${esc(specLine(l))} · ${esc(t('published'))} ${esc(dateFmt(l.created_at))} · ${l.views} ${esc(pluralWord(l.views, 'views'))}</div>
           ${l.description ? `<p style="margin:14px 0 0;white-space:pre-wrap">${esc(l.description)}</p>` : ''}
         </div>
         <div class="panel">
@@ -471,9 +485,14 @@ async function pageListing(id) {
             <div class="brand-mark" style="background:var(--brand)">${esc((l.owner_name || '?')[0].toUpperCase())}</div>
             <div><b>${esc(l.owner_name)}</b><div class="small muted">${esc(t('memberSince'))} ${esc(dateFmt(l.owner_since))}</div></div>
           </div>
+          <div style="margin-top:10px"><button class="btn-link" id="owner-rating">${starsHtml((l.owner_rating || {}).avg, (l.owner_rating || {}).count)}</button></div>
           <div class="small muted" style="margin-top:12px">${esc(t('phoneAfterAccept'))}</div>
-          ${App.user && !data.isOwner ? `<button class="btn btn-sm btn-block" id="fav" style="margin-top:10px">
-            ${data.isFavorite ? '★ ' + esc(t('inFavorites')) : '☆ ' + esc(t('favorite'))}</button>` : ''}
+          <div class="row" style="margin-top:10px">
+            ${App.user && !data.isOwner ? `<button class="btn btn-sm grow" id="fav">
+              ${data.isFavorite ? '★ ' + esc(t('inFavorites')) : '☆ ' + esc(t('favorite'))}</button>` : ''}
+            <button class="btn btn-sm" id="share-btn">🔗 ${esc(t('share'))}</button>
+          </div>
+          ${App.user && !data.isOwner ? `<button class="btn-link small muted" id="report-btn" style="margin-top:10px">⚠ ${esc(t('reportListing'))}</button>` : ''}
         </div>
       </aside>
     </div>`;
@@ -485,8 +504,8 @@ async function pageListing(id) {
     gal.innerHTML = `
       <div class="gallery-main">
         ${ph.length ? `<img src="${esc(ph[photoIdx])}" alt="${esc(l.title)}">` : `<div class="ph">${l.kind === 'car' ? '🚗' : '🏠'}</div>`}
-        ${ph.length > 1 ? `<button class="gallery-nav prev" data-d="-1" aria-label="prev">←</button>
-                           <button class="gallery-nav next" data-d="1" aria-label="next">→</button>` : ''}
+        ${ph.length > 1 ? `<button class="gallery-nav prev" data-d="-1" aria-label="${esc(t('galleryPrev'))}">←</button>
+                           <button class="gallery-nav next" data-d="1" aria-label="${esc(t('galleryNext'))}">→</button>` : ''}
       </div>
       ${ph.length > 1 ? `<div class="gallery-strip">${ph.map((p, i) =>
         `<img src="${esc(p)}" data-i="${i}" class="${i === photoIdx ? 'on' : ''}" alt="">`).join('')}</div>` : ''}`;
@@ -500,6 +519,17 @@ async function pageListing(id) {
     }));
   };
   drawGallery();
+
+  if ((l.photos || []).length > 1) {
+    const onKey = (e) => {
+      if (App.gen !== gen) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const ph = l.photos || [];
+      photoIdx = (photoIdx + (e.key === 'ArrowLeft' ? -1 : 1) + ph.length) % ph.length;
+      drawGallery();
+    };
+    document.addEventListener('keydown', onKey);
+  }
 
   const offerBtn = document.getElementById('make-offer');
   if (offerBtn) offerBtn.addEventListener('click', () => openOfferModal(l));
@@ -529,12 +559,128 @@ async function pageListing(id) {
 
   const favBtn = document.getElementById('fav');
   if (favBtn) favBtn.addEventListener('click', async () => {
-    const r = await API.post(`/listings/${l.id}/favorite`);
-    favBtn.textContent = r.isFavorite ? '★ ' + t('inFavorites') : '☆ ' + t('favorite');
+    try {
+      const r = await API.post(`/listings/${l.id}/favorite`);
+      favBtn.textContent = r.isFavorite ? '★ ' + t('inFavorites') : '☆ ' + t('favorite');
+    } catch (err) { toast(err.text, true); }
   });
 
   const promoteBtn = document.getElementById('promote-btn');
   if (promoteBtn) promoteBtn.addEventListener('click', () => openPromoteModal(l.id));
+
+  const ratingBtn = document.getElementById('owner-rating');
+  if (ratingBtn) ratingBtn.addEventListener('click', () => openReviewsModal(l.user_id, l.owner_name));
+
+  const shareBtn = document.getElementById('share-btn');
+  if (shareBtn) shareBtn.addEventListener('click', () => shareListing(l));
+
+  const reportBtn = document.getElementById('report-btn');
+  if (reportBtn) reportBtn.addEventListener('click', () => openReportModal({ listing_id: l.id }));
+}
+
+/* ---------------- поделиться объявлением (стабильная ссылка /l/:id — с корректным превью) ---------------- */
+
+async function shareListing(l) {
+  const url = location.origin + '/l/' + l.id;
+  if (navigator.share) {
+    try { await navigator.share({ title: l.title, text: specLine(l), url }); } catch { /* отменено */ }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast(t('linkCopied'));
+  } catch {
+    toast(url);
+  }
+}
+
+/* ---------------- модалка: отзывы о пользователе ---------------- */
+
+async function openReviewsModal(userId, name) {
+  const modal = openModal(t('reviewsTitle') + ' · ' + name,
+    `<div class="skeleton" style="height:120px"></div>`,
+    `<button class="btn" data-close="1">${esc(t('close'))}</button>`);
+  try {
+    const data = await API.get('/users/' + userId + '/reviews');
+    const body = modal.querySelector('.modal-body');
+    if (!body) return;
+    body.innerHTML = `
+     <div class="row" style="margin-bottom:12px">${starsHtml(data.avg, data.count, 'lg')}</div>
+     ${data.items.length ? `<div class="stack">${data.items.map((r) => `
+       <div class="review">
+         <div class="spread"><span class="stars">${'★'.repeat(r.rating)}${'☆'.repeat(5 - r.rating)}</span>
+           <span class="small muted">${esc(dateFmt(r.created_at))}</span></div>
+         <div class="small muted">${esc(r.from_name)}</div>
+         ${r.comment ? `<p style="margin-top:6px">${esc(r.comment)}</p>` : ''}
+       </div>`).join('')}</div>` : `<div class="small muted">${esc(t('noReviewsYet'))}</div>`}`;
+  } catch (err) {
+    toast(err.text, true);
+    closeModal();
+  }
+}
+
+/* ---------------- модалка: оставить отзыв о контрагенте по завершённой сделке ---------------- */
+
+function openReviewModal(offerId, peerName, onDone) {
+  let rating = 5;
+  const modal = openModal(t('leaveReview') + ' · ' + peerName,
+    `<div class="field"><label>${esc(t('yourRating'))}</label>${starPickerHtml('review-stars', rating)}</div>
+     <div class="field"><label>${esc(t('reviewComment'))}</label>
+       <textarea id="review-comment" maxlength="1000" placeholder="${esc(t('reviewCommentPh'))}"></textarea></div>`,
+    `<button class="btn" data-close="1">${esc(t('cancel'))}</button>
+     <button class="btn btn-primary" id="review-send">${esc(t('send'))}</button>`);
+
+  modal.querySelectorAll('#review-stars [data-v]').forEach((b) => b.addEventListener('click', () => {
+    rating = Number(b.dataset.v);
+    modal.querySelectorAll('#review-stars [data-v]').forEach((x) => {
+      const on = Number(x.dataset.v) <= rating;
+      x.classList.toggle('on', on);
+      x.setAttribute('aria-checked', Number(x.dataset.v) === rating ? 'true' : 'false');
+    });
+  }));
+
+  modal.querySelector('#review-send').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      await API.post(`/offers/${offerId}/review`, { rating, comment: modal.querySelector('#review-comment').value });
+      closeModal();
+      toast(t('reviewSaved'));
+      if (onDone) onDone();
+    } catch (err) {
+      toast(err.text, true);
+      e.currentTarget.disabled = false;
+    }
+  });
+}
+
+/* ---------------- модалка: пожаловаться ---------------- */
+
+function openReportModal(target) {
+  if (!App.user) { toast(t('loginRequired'), true); return go('#/login'); }
+  const reasons = ['spam', 'fraud', 'wrong_category', 'offensive', 'duplicate', 'other'];
+  const modal = openModal(t('reportTitle'),
+    `<div class="field"><label>${esc(t('reportReason'))}</label>
+       <select id="report-reason">${reasons.map((r) => `<option value="${r}">${esc(t('reportReason_' + r))}</option>`).join('')}</select></div>
+     <div class="field"><label>${esc(t('reportComment'))}</label>
+       <textarea id="report-comment" maxlength="1000" placeholder="${esc(t('reportCommentPh'))}"></textarea></div>`,
+    `<button class="btn" data-close="1">${esc(t('cancel'))}</button>
+     <button class="btn btn-danger" id="report-send">${esc(t('reportSend'))}</button>`);
+
+  modal.querySelector('#report-send').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      await API.post('/reports', {
+        listing_id: target.listing_id, reported_user_id: target.reported_user_id,
+        reason: modal.querySelector('#report-reason').value,
+        comment: modal.querySelector('#report-comment').value,
+      });
+      closeModal();
+      toast(t('reportSent'));
+    } catch (err) {
+      toast(err.text, true);
+      e.currentTarget.disabled = false;
+    }
+  });
 }
 
 /* ---------------- модалка: предложить обмен ---------------- */
@@ -692,6 +838,7 @@ async function pageForm(editId) {
     wanted_kinds: [], steering: 'left', city: App.user && App.user.city ? App.user.city : '', photos: [],
   };
   if (editId) {
+    view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
     const d = await API.get('/listings/' + editId);
     if (stale(gen)) return;
     l = d.listing;
@@ -704,6 +851,8 @@ async function pageForm(editId) {
   view().innerHTML = `
     <div style="max-width:820px;margin:0 auto">
       <h1 style="margin-bottom:16px">${esc(editId ? t('edit') : t('heroCta'))}</h1>
+      ${!editId && App.user && App.user.ref_bonus_pending
+        ? `<div class="fit-note ok" style="margin-bottom:16px">🎁 ${esc(t('refPendingHint'))}</div>` : ''}
       <form id="lform" class="stack">
         <div class="panel">
           <div class="form-sec-title">${esc(t('kind'))}</div>
@@ -1019,13 +1168,23 @@ async function pageForm(editId) {
         go('#/l/' + editId);
       } else {
         const r = await API.form('POST', '/listings', fd);
-        toast(t('saved'));
+        if (r.referralBonus) {
+          if (App.user) {
+            App.user.bonus_top_days = (App.user.bonus_top_days || 0) + r.referralBonus.you;
+            App.user.ref_bonus_pending = false;
+          }
+          toast(t('referralGranted', { you: r.referralBonus.you, friend: r.referralBonus.friend }));
+        } else {
+          toast(t('saved'));
+        }
         go('#/l/' + r.id);
       }
     } catch (err) {
       btn.disabled = false;
       btn.textContent = editId ? t('saveChanges') : t('publish');
-      errBox.innerHTML = `<div class="form-error">${esc(err.text)}</div>`;
+      errBox.innerHTML = err.code === 'listing_limit_reached'
+        ? `<div class="form-error">${esc(t('listingLimitReached'))} <a href="#/packages">${esc(t('packagesTitle'))} →</a></div>`
+        : `<div class="form-error">${esc(err.text)}</div>`;
       window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
     }
   });
@@ -1035,7 +1194,8 @@ async function pageForm(editId) {
 
 async function pageMy() {
   const gen = App.gen;
-  const [{ items }, { items: payments }] = await Promise.all([
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
+  const [{ items, limit }, { items: payments }] = await Promise.all([
     API.get('/my/listings'),
     API.get('/my/payments').catch(() => ({ items: [] })),
   ]);
@@ -1045,6 +1205,10 @@ async function pageMy() {
       `<a class="btn btn-primary" href="#/new">${esc(t('heroCta'))}</a>`);
     return;
   }
+  const activeCount = items.filter((l) => l.status === 'active' || l.status === 'hidden').length;
+  const nudgeChip = (l) => l.nudge === 'photos'
+    ? `<a class="chip chip-wait" href="#/edit/${l.id}">📷 ${esc(t('nudgePhotos'))}</a>`
+    : l.nudge === 'stale' ? `<button class="chip chip-wait" data-promote="${l.id}">⏫ ${esc(t('nudgeStale'))}</button>` : '';
   const statusChip = (s) => {
     const map = { active: 'chip-ok', hidden: 'chip', done: 'chip-brand' };
     const label = { active: t('statusActive'), hidden: t('statusHidden'), done: t('statusDone') }[s];
@@ -1061,11 +1225,18 @@ async function pageMy() {
     return `<button class="btn btn-sm btn-primary" data-promote="${l.id}">${esc(t('promoteCta'))}</button>`;
   };
 
+  const planOn = App.user && App.user.plan_code && App.user.plan_until
+    && App.user.plan_until > new Date().toISOString().slice(0, 19).replace('T', ' ');
   view().innerHTML = `
-    <div class="spread" style="margin-bottom:16px">
+    <div class="spread" style="margin-bottom:6px">
       <h1>${esc(t('navMy'))}</h1>
       <a class="btn btn-dark" href="#/new">+ ${esc(t('navPost'))}</a>
     </div>
+    <p class="small muted" style="margin:0 0 16px">${limit === null
+      ? esc(t('planUnlimited'))
+      : esc(t('planLimitLine', { n: activeCount, limit }))
+        + (planOn ? ' · ' + esc(t('plan_' + App.user.plan_code)) : '')}
+      ${limit !== null && activeCount >= limit ? ` <a href="#/packages">${esc(t('packagesTitle'))} →</a>` : ''}</p>
     <div class="stack">
       ${items.map((l) => `
         <div class="panel">
@@ -1080,6 +1251,7 @@ async function pageMy() {
             <div class="row" style="gap:6px">
               ${statusChip(l.status)}
               ${l.pending_offers ? `<a href="#/offers" class="chip chip-brand">⇄ ${l.pending_offers} ${esc(t('newOffers'))}</a>` : ''}
+              ${nudgeChip(l)}
             </div>
           </div>
           <div class="row" style="margin-top:12px">
@@ -1087,7 +1259,7 @@ async function pageMy() {
             ${l.status === 'active'
               ? `<button class="btn btn-sm" data-act="hidden" data-id="${l.id}">${esc(t('hide'))}</button>
                  <button class="btn btn-sm" data-act="done" data-id="${l.id}">${esc(t('markDone'))}</button>`
-              : `<button class="btn btn-sm" data-act="active" data-id="${l.id}">${esc(t('activate'))}</button>`}
+              : `<button class="btn btn-sm" data-act="active" data-id="${l.id}"${limit !== null && activeCount >= limit && l.status === 'done' ? ` disabled title="${esc(t('listingLimitReached'))}"` : ''}>${esc(t('activate'))}</button>`}
             <button class="btn btn-sm btn-danger" data-del="${l.id}">${esc(t('delete'))}</button>
             ${l.status === 'active' ? topHtml(l) : ''}
           </div>
@@ -1095,14 +1267,27 @@ async function pageMy() {
     </div>`;
 
   view().querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', async () => {
-    await API.post(`/listings/${b.dataset.id}/status`, { status: b.dataset.act });
-    render();
+    if (b.dataset.act === 'done' && !confirm(t('markDoneConfirm'))) return;
+    b.disabled = true;
+    try {
+      await API.post(`/listings/${b.dataset.id}/status`, { status: b.dataset.act });
+      render();
+    } catch (err) {
+      toast(err.text, true);
+      b.disabled = false;
+    }
   }));
   view().querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm(t('deleteConfirm'))) return;
-    await API.del('/listings/' + b.dataset.del);
-    toast(t('saved'));
-    render();
+    b.disabled = true;
+    try {
+      await API.del('/listings/' + b.dataset.del);
+      toast(t('saved'));
+      render();
+    } catch (err) {
+      toast(err.text, true);
+      b.disabled = false;
+    }
   }));
   view().querySelectorAll('[data-promote]').forEach((b) => b.addEventListener('click', () => openPromoteModal(b.dataset.promote)));
 }
@@ -1110,6 +1295,7 @@ async function pageMy() {
 /* ---------------- модалка: поднять объявление в топ ---------------- */
 
 async function openPromoteModal(listingId) {
+  await loadMe();
   const info = await API.get('/promote/info');
   const methods = [
     ['idram', t('method_idram')], ['telcell', t('method_telcell')], ['card', t('method_card')],
@@ -1122,6 +1308,10 @@ async function openPromoteModal(listingId) {
         <span class="chip">${info.days} ${esc(t('promoteDaysWord'))}</span>
       </div>
       <p class="small muted">${esc(t('promoteModalDesc'))}</p>
+      ${App.user.bonus_top_days >= info.days ? `<div class="fit-note ok">
+        🎁 ${esc(t('bonusAvailable', { n: App.user.bonus_top_days }))}
+        <button type="button" class="btn btn-sm btn-primary" id="pm-bonus" style="margin-top:8px">${esc(t('bonusUse'))}</button>
+      </div>` : ''}
       ${info.instructions ? `<div class="panel" style="background:var(--surface-2);padding:12px">
         <b>${esc(t('promoteInstructionsTitle'))}</b>
         <div class="small" style="margin-top:6px;white-space:pre-wrap">${esc(info.instructions)}</div>
@@ -1139,6 +1329,21 @@ async function openPromoteModal(listingId) {
     </div>`,
     `<button class="btn" data-close="1">${esc(t('cancel'))}</button>
      <button class="btn btn-primary" id="pm-submit">${esc(t('promoteSubmit'))}</button>`);
+
+  const bonusBtn = document.getElementById('pm-bonus');
+  if (bonusBtn) bonusBtn.addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await API.post(`/listings/${listingId}/promote/bonus`);
+      if (App.user && r.bonus_top_days !== undefined) App.user.bonus_top_days = r.bonus_top_days;
+      closeModal();
+      toast(t('promoteSuccess'));
+      render();
+    } catch (err) {
+      toast(err.text, true);
+      e.currentTarget.disabled = false;
+    }
+  });
 
   document.getElementById('pm-receipt').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -1166,10 +1371,92 @@ async function openPromoteModal(listingId) {
   });
 }
 
+/* ---------------- страница: тарифы для дилеров ---------------- */
+
+async function pagePackages() {
+  const gen = App.gen;
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
+  const data = await API.get('/packages');
+  if (stale(gen)) return;
+  const cur = data.current;
+  const isActive = cur.until && cur.until > new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const planName = cur.code ? t('plan_' + cur.code) : t('planFree');
+
+  view().innerHTML = `
+    <a class="btn btn-ghost btn-sm" href="#/profile" style="margin-bottom:12px">← ${esc(t('back'))}</a>
+    <h1 style="margin-bottom:6px">${esc(t('packagesTitle'))}</h1>
+    <p class="small muted" style="margin:0 0 16px">${esc(t('packagesLead'))}</p>
+    ${isActive ? `<div class="fit-note ok" style="margin-bottom:16px">
+      ${esc(t('planActiveLine', { code: planName, until: dateFmt(cur.until) }))}</div>` : ''}
+    ${data.pending ? `<div class="fit-note wait" style="margin-bottom:16px">⏳ ${esc(t('packagePending'))}
+      · ${esc(t('plan_' + data.pending.package_code))}</div>` : ''}
+    <div class="grid" id="pkg-grid">
+      <div class="panel">
+        <div class="form-sec-title">${esc(t('planFree'))}</div>
+        <div class="price-big" style="font-size:22px">${esc(t('free'))}</div>
+        <p class="small muted">${esc(t('planFreeDesc', { n: data.freeLimit }))}</p>
+      </div>
+      ${data.items.map((p) => `
+        <div class="panel">
+          <div class="form-sec-title">${esc(t('plan_' + p.code))}</div>
+          <div class="price-big" style="font-size:22px">${esc(money(p.price, data.currency))}</div>
+          <p class="small muted">${esc(p.limit === null
+            ? t('planUnlimitedDesc', { days: p.days })
+            : t('planLimitDesc', { n: p.limit, days: p.days }))}</p>
+          <button class="btn btn-primary btn-block" data-order="${p.code}"${data.pending ? ' disabled' : ''}>${esc(t('packageOrder'))}</button>
+        </div>`).join('')}
+    </div>`;
+
+  view().querySelectorAll('[data-order]').forEach((b) => b.addEventListener('click', () => openPackageModal(b.dataset.order, data)));
+}
+
+async function openPackageModal(code, data) {
+  const pkg = data.items.find((p) => p.code === code);
+  const methods = [
+    ['idram', t('method_idram')], ['telcell', t('method_telcell')], ['card', t('method_card')],
+    ['cash', t('method_cash')], ['other', t('method_other')],
+  ];
+  openModal(t('plan_' + code), `
+    <div class="stack">
+      <div class="row" style="gap:8px">
+        <span class="chip chip-brand">${esc(money(pkg.price, data.currency))}</span>
+        <span class="chip">${pkg.days} ${esc(t('promoteDaysWord'))}</span>
+      </div>
+      <div class="field"><label>${esc(t('promoteMethod'))}</label>
+        <select id="pk-method">${methods.map(([v, lbl]) => `<option value="${esc(v)}">${esc(lbl)}</option>`).join('')}</select></div>
+      <div class="field"><label>${esc(t('promoteReference'))}</label>
+        <input id="pk-ref" placeholder="${esc(t('promoteReferencePh'))}" maxlength="200"></div>
+      <div class="field"><label>${esc(t('promoteReceipt'))}</label>
+        <input id="pk-receipt" type="file" accept="image/jpeg,image/png,image/webp,image/avif"></div>
+    </div>`,
+    `<button class="btn" data-close="1">${esc(t('cancel'))}</button>
+     <button class="btn btn-primary" id="pk-submit">${esc(t('promoteSubmit'))}</button>`);
+
+  document.getElementById('pk-submit').addEventListener('click', async (e) => {
+    const file = document.getElementById('pk-receipt').files[0];
+    if (!file) { toast(t('err_receipt_required'), true); return; }
+    e.currentTarget.disabled = true;
+    try {
+      const fd = new FormData();
+      fd.append('method', document.getElementById('pk-method').value);
+      fd.append('reference', document.getElementById('pk-ref').value);
+      fd.append('receipt', file);
+      await API.form('POST', `/packages/${code}/order`, fd);
+      closeModal();
+      toast(t('packageOrderSuccess'));
+      render();
+    } catch (err) {
+      toast(err.text, true);
+      e.currentTarget.disabled = false;
+    }
+  });
+}
+
 /* ---------------- страница: избранное ---------------- */
 
 async function pageFav() {
   const gen = App.gen;
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
   const { items } = await API.get('/my/favorites');
   if (stale(gen)) return;
   view().innerHTML = `<h1 style="margin-bottom:16px">${esc(t('navFav'))}</h1>` +
@@ -1180,6 +1467,7 @@ async function pageFav() {
 
 async function pageOffers(box) {
   const gen = App.gen;
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
   const { items } = await API.get('/offers?box=' + box);
   await refreshSummary();
   if (stale(gen)) return;
@@ -1237,6 +1525,9 @@ async function pageOffers(box) {
               <button class="btn btn-sm btn-danger" data-offer="${o.id}" data-do="cancel">${esc(t('cancelOffer'))}</button>` : ''}
             ${o.status === 'accepted' && o.conversation_id ? `
               <a class="btn btn-sm btn-primary" href="#/chats/${o.conversation_id}">💬 ${esc(t('openChat'))}</a>` : ''}
+            ${o.status === 'accepted' ? (o.my_review
+              ? `<span class="chip">${'★'.repeat(o.my_review)} ${esc(t('reviewLeft'))}</span>`
+              : `<button class="btn btn-sm" data-review="${o.id}" data-peer="${esc(box === 'in' ? o.from_name : o.to_name)}">★ ${esc(t('leaveReview'))}</button>`) : ''}
           </div>
           ${o.status === 'pending' && box === 'in' ? `<div class="small muted">${esc(t('acceptHint'))}</div>` : ''}
         </div>`).join('')
@@ -1255,12 +1546,16 @@ async function pageOffers(box) {
       toast(err.text, true);
     }
   }));
+  view().querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', () => {
+    openReviewModal(b.dataset.review, b.dataset.peer, render);
+  }));
 }
 
 /* ---------------- страница: чаты ---------------- */
 
 async function pageChats(convId) {
   const gen = App.gen;
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
   const { items } = await API.get('/conversations');
   if (stale(gen)) return;
   if (!items.length) {
@@ -1293,6 +1588,7 @@ async function pageChats(convId) {
             <b>${esc(active.peer_name)}</b>
             <div class="small muted">${esc(t('chatAbout'))} <a href="#/l/${active.listing_id}">${esc(active.listing_title)}</a></div>
           </div>
+          <div id="chat-review-slot"></div>
         </div>
         <div class="chat-log" id="log"></div>
         <form class="chat-form" id="msg-form">
@@ -1310,6 +1606,18 @@ async function pageChats(convId) {
     const d = await API.get(`/conversations/${active.id}/messages?after=${lastId}`);
     if (stale(gen)) return;
     me = d.me;
+    const slot = document.getElementById('chat-review-slot');
+    if (slot) {
+      const show = d.offer && !d.offer.my_review;
+      if (slot.dataset.show !== String(!!show)) {
+        slot.dataset.show = String(!!show);
+        slot.innerHTML = show
+          ? `<button class="btn btn-sm" id="chat-review-btn">★ ${esc(t('leaveReview'))}</button>`
+          : '';
+        const rb = document.getElementById('chat-review-btn');
+        if (rb) rb.addEventListener('click', () => openReviewModal(active.offer_id, active.peer_name, () => poll(false)));
+      }
+    }
     if (!d.items.length) return;
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     for (const m of d.items) {
@@ -1350,6 +1658,7 @@ async function pageChats(convId) {
 
 function pageProfile() {
   const u = App.user;
+  const gen = App.gen;
   view().innerHTML = `
     <div style="max-width:560px;margin:0 auto" class="stack">
       <h1>${esc(t('profileTitle'))}</h1>
@@ -1384,14 +1693,52 @@ function pageProfile() {
       </div>
 
       <div class="panel">
+        <div class="form-sec-title">🎁 ${esc(t('referralTitle'))}</div>
+        <p class="small muted" style="margin:-4px 0 12px">${esc(t('referralLead'))}</p>
+        ${App.user && App.user.ref_bonus_pending
+          ? `<div class="fit-note ok" style="margin-bottom:12px">🎁 ${esc(t('refPendingHint'))} <a href="#/new">${esc(t('postFirst'))} →</a></div>` : ''}
+        <div id="referral-box"><div class="skeleton" style="height:80px"></div></div>
+      </div>
+
+      <div class="panel">
         <div class="row">
           <a class="btn btn-sm" href="#/my">${esc(t('navMy'))}</a>
           <a class="btn btn-sm" href="#/alerts">🔔 ${esc(t('navAlerts'))}</a>
           <a class="btn btn-sm" href="#/fav">${esc(t('navFav'))}</a>
+          <a class="btn btn-sm" href="#/packages">📦 ${esc(t('packagesTitle'))}</a>
           <button class="btn btn-sm btn-danger" id="logout">${esc(t('navLogout'))}</button>
         </div>
       </div>
     </div>`;
+
+  API.get('/me/referral').then((r) => {
+    if (stale(gen)) return;
+    const box = document.getElementById('referral-box');
+    if (!box) return;
+    const link = location.origin + '/#/register?ref=' + r.code;
+    box.innerHTML = `
+      <div class="row" style="flex-wrap:nowrap">
+        <input id="ref-link" value="${esc(link)}" readonly style="font-family:var(--font-mono)">
+        <button class="btn btn-sm" id="ref-copy">${esc(t('copy'))}</button>
+        <button class="btn btn-sm" id="ref-share">🔗</button>
+      </div>
+      <div class="small muted" style="margin-top:10px">${esc(t('referralStats', { invited: r.invitedCount, qualified: r.qualifiedCount, bonus: r.bonusTopDays }))}</div>
+      <div class="small muted" style="margin-top:4px">${esc(t('referralExplain', { friend: r.bonusForFriend, you: r.bonusForYou }))}</div>`;
+    document.getElementById('ref-copy').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(link).catch(() => {});
+      toast(t('linkCopied'));
+    });
+    document.getElementById('ref-share').addEventListener('click', async () => {
+      if (navigator.share) { try { await navigator.share({ title: 'TooBarter', url: link }); } catch { /* отменено */ } }
+      else { await navigator.clipboard.writeText(link).catch(() => {}); toast(t('linkCopied')); }
+    });
+  }).catch(() => {
+    if (stale(gen)) return;
+    const box = document.getElementById('referral-box');
+    if (box) box.innerHTML = `<button class="btn btn-sm" type="button" id="ref-retry">${esc(t('tryAgain'))}</button>`;
+    const retry = document.getElementById('ref-retry');
+    if (retry) retry.addEventListener('click', () => render());
+  });
 
   document.getElementById('p-save').addEventListener('click', async (e) => {
     e.currentTarget.disabled = true;
@@ -1435,13 +1782,15 @@ function pageProfile() {
 
 /* ---------------- страница: вход / регистрация ---------------- */
 
-function pageAuth(mode) {
+function pageAuth(mode, refCode) {
   const isLogin = mode === 'login';
   view().innerHTML = `
     <div class="auth-wrap">
       <div class="panel stack">
         <h1>${esc(isLogin ? t('loginTitle') : t('registerTitle'))}</h1>
+        ${!isLogin && refCode ? `<div class="fit-note ok">🎁 ${esc(t('refWelcome'))}</div>` : ''}
         <form id="auth" class="stack">
+          ${!isLogin && refCode ? `<input type="hidden" name="ref" value="${esc(refCode)}">` : ''}
           ${isLogin ? '' : `<div class="field"><label>${esc(t('name'))}</label><input name="name" required maxlength="80"></div>`}
           <div class="field"><label>${esc(t('email'))}</label><input name="email" type="email" required autocomplete="email"></div>
           <div class="field"><label>${esc(t('password'))}</label>
@@ -1476,7 +1825,14 @@ function pageAuth(mode) {
       App.user = r.user;
       if (isLogin && r.user.lang && !localStorage.getItem('lang')) I18N.set(r.user.lang);
       await refreshSummary();
-      go('#/');
+      let next = '#/';
+      try {
+        next = sessionStorage.getItem('afterLogin') || '#/';
+        sessionStorage.removeItem('afterLogin');
+      } catch { /* private mode */ }
+      const nextPage = (next.replace(/^#\//, '').split(/[/?]/)[0] || 'feed');
+      if (!GUARDED.includes(nextPage) && nextPage !== 'l') next = '#/';
+      go(next);
     } catch (err) {
       btn.disabled = false;
       document.getElementById('auth-err').innerHTML = `<div class="form-error">${esc(err.text)}</div>`;
@@ -1604,6 +1960,7 @@ function openAlertModal(prefill, editId) {
 
 async function pageAlerts(alertId) {
   const gen = App.gen;
+  view().innerHTML = `<div class="skeleton" style="height:40vh"></div>`;
 
   if (alertId) {
     const [alerts, res] = await Promise.all([API.get('/alerts'), API.get('/alerts/' + alertId + '/matches')]);

@@ -217,6 +217,56 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (user_id, created_at DESC);
+
+-- отзыв о контрагенте после принятого предложения (взаимно, по одному на сторону)
+CREATE TABLE IF NOT EXISTS reviews (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  offer_id     INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  from_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating       INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  comment      TEXT,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_once ON reviews (offer_id, from_user_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_to ON reviews (to_user_id);
+
+-- жалобы на объявление или пользователя
+CREATE TABLE IF NOT EXISTS reports (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  reporter_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  listing_id       INTEGER REFERENCES listings(id) ON DELETE CASCADE,
+  reported_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  reason           TEXT    NOT NULL,
+  comment          TEXT,
+  status           TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','resolved','dismissed')),
+  resolved_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  resolved_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports (status, created_at DESC);
+
+-- заявки на тарифный пакет (расширяет лимит активных объявлений); подтверждаются
+-- вручную админом по той же схеме, что и поднятие в топ
+CREATE TABLE IF NOT EXISTS package_orders (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  package_code TEXT    NOT NULL,
+  amount       INTEGER NOT NULL,
+  currency     TEXT    NOT NULL DEFAULT 'AMD',
+  days         INTEGER NOT NULL DEFAULT 30,
+  listing_limit INTEGER,
+  method       TEXT,
+  reference    TEXT,
+  receipt_file TEXT,
+  status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
+  admin_note   TEXT,
+  confirmed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  resolved_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_package_orders_status ON package_orders (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_package_orders_user ON package_orders (user_id, created_at DESC);
 `);
 
 /* Мягкие миграции для баз, созданных прошлой версией */
@@ -229,6 +279,35 @@ addColumn('offers', 'wish_index', 'INTEGER');
 addColumn('listings', 'top_until', 'TEXT');
 addColumn('users', 'banned', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('payments', 'receipt_file', 'TEXT');
+addColumn('users', 'ref_code', 'TEXT');
+addColumn('users', 'referred_by', 'INTEGER REFERENCES users(id) ON DELETE SET NULL');
+addColumn('users', 'bonus_top_days', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'plan_code', 'TEXT');
+addColumn('users', 'plan_until', 'TEXT');
+addColumn('users', 'plan_limit', 'INTEGER');
+{
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  const hadGrant = userCols.includes('ref_bonus_granted');
+  addColumn('users', 'ref_bonus_granted', 'INTEGER NOT NULL DEFAULT 0');
+  /* старая версия начисляла бонус сразу при регистрации — не выплачиваем его второй раз */
+  if (!hadGrant) db.exec('UPDATE users SET ref_bonus_granted = 1 WHERE referred_by IS NOT NULL');
+}
 db.exec('CREATE INDEX IF NOT EXISTS idx_listings_top ON listings (top_until)');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ref_code ON users (ref_code)');
+
+/* существующим пользователям, у которых ref_code ещё не назначен
+   (созданы до этой версии), генерируем его один раз */
+(function backfillRefCodes() {
+  const rows = db.prepare('SELECT id FROM users WHERE ref_code IS NULL').all();
+  if (!rows.length) return;
+  const crypto = require('crypto');
+  const upd = db.prepare('UPDATE users SET ref_code = ? WHERE id = ?');
+  for (const r of rows) {
+    let code;
+    do { code = crypto.randomBytes(4).toString('hex'); }
+    while (db.prepare('SELECT 1 FROM users WHERE ref_code = ?').get(code));
+    upd.run(code, r.id);
+  }
+})();
 
 module.exports = db;

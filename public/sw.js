@@ -1,7 +1,7 @@
 /* Service worker: приложение открывается без сети, данные всегда берутся свежими.
    Меняешь файлы в public/ — подними версию, старый кэш удалится сам. */
 
-const VERSION = 'toobarter-v6';   // поднимай при каждом изменении файлов в public/
+const VERSION = 'toobarter-v11';   // поднимай при каждом изменении файлов в public/
 const SHELL = VERSION + '-shell';
 const MEDIA = VERSION + '-media';
 
@@ -92,8 +92,8 @@ function offlinePage() {
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
      <style>body{margin:0;height:100vh;display:grid;place-items:center;background:#0e1420;color:#fff;
      font-family:system-ui,sans-serif;text-align:center;padding:24px}p{color:#9aa4b2}</style>
-     <div><h1 style="font-size:44px;margin:0">⇄</h1><h2>Нет соединения</h2>
-     <p>Проверь интернет и попробуй ещё раз.</p></div>`,
+     <div><h1 style="font-size:44px;margin:0">⇄</h1><h2>Offline</h2>
+     <p>Нет соединения · Կապ չկա · No connection</p></div>`,
     { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
   );
 }
